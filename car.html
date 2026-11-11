@@ -18,6 +18,8 @@
   .big-ph{aspect-ratio:16/10;border-radius:12px;background:#222 center/cover;margin-top:14px}
   .feed .entry{grid-template-columns:1fr}
   .due{border:2px solid var(--red)}
+  .worklist{margin:8px 0 0;padding-left:20px;line-height:1.5}
+  .worklist li{margin:3px 0}
   footer{color:var(--muted);font-size:13px;text-align:center;padding:30px 16px 40px}
 </style>
 </head>
@@ -56,18 +58,27 @@
     else groups.push({ kind: e.kind, items: [e] });
   }
 
-  const invHtml = (inv) => `<div class="card section ${inv.status === "sent" ? "due" : ""}" id="${inv.status === "sent" ? "invoice" : ""}">
+  const amt = (l) => (Number(l.qty) || 0) * (Number(l.price) || 0);
+  const list = (t) => String(t || "").split("\n").map((x) => x.replace(/^[-•*\s]+/, "").trim()).filter(Boolean);
+  const invHtml = (inv) => {
+    const items = (inv.lines || []).filter((l) => l.kind !== "deposit"), deps = (inv.lines || []).filter((l) => l.kind === "deposit");
+    const dep = deps.reduce((a, l) => a + Math.abs(amt(l)), 0);
+    return `<div class="card section ${inv.status === "sent" ? "due" : ""}" id="${inv.status === "sent" ? "invoice" : ""}">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px"><h2>Invoice #${inv.number}</h2>
       <span class="pill ${inv.status === "paid" ? "s-ready" : "s-waiting_parts"}">${inv.status === "paid" ? "Paid" : "Due"}</span></div>
       <div style="overflow-x:auto"><table class="inv section"><thead><tr><th>Item</th><th class="r">Qty</th><th class="r">Amount</th></tr></thead><tbody>
-      ${(inv.lines || []).map((l) => `<tr><td>${esc(l.kind === "labor" && l.description === "Labor" ? "Labor" : l.description)}</td><td class="r">${esc(l.qty)}</td><td class="r">${money((Number(l.qty) || 0) * (Number(l.price) || 0))}</td></tr>`).join("")}
+      ${items.map((l) => `<tr><td>${esc(l.description)}</td><td class="r">${esc(l.qty)}</td><td class="r">${money(amt(l))}</td></tr>`).join("")}
       </tbody></table></div>
-      <div class="totals section"><div><span>Subtotal</span><span>${money(inv.subtotal)}</span></div><div><span>Tax</span><span>${money(inv.tax)}</span></div><div class="grand"><span>Total</span><span>${money(inv.total)}</span></div></div>
+      <div class="totals section"><div><span>Subtotal</span><span>${money(inv.subtotal)}</span></div><div><span>Sales tax</span><span>${money(inv.tax)}</span></div>
+      ${dep ? `<div><span>Deposit paid</span><span>−${money(dep)}</span></div>` : ""}<div class="grand"><span>Total due</span><span>${money(inv.total)}</span></div></div>
+      ${list(inv.work_done).length ? `<h3 class="section">Work performed</h3><ul class="worklist">${list(inv.work_done).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
+      ${list(inv.recommendations).length ? `<h3 class="section">Recommendations</h3><ul class="worklist">${list(inv.recommendations).map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}
       ${inv.notes ? `<p style="white-space:pre-wrap">${esc(inv.notes)}</p>` : ""}
       ${inv.status === "sent" ? (shop.payment_url
         ? `<a class="btn red block big section" href="${esc(shop.payment_url)}${shop.payment_url.includes("?") ? "&" : "?"}invoice=${inv.number}&amount=${inv.total}" target="_blank" rel="noopener">Pay ${money(inv.total)}</a>`
         : `<div class="section"><p class="muted" style="margin:0 0 8px">To pay, give the shop a call:</p><a class="btn red block big" href="tel:${esc(shop.phone || "")}">Call ${esc(shop.phone || "the shop")}</a></div>`) : ""}
     </div>`;
+  };
 
   view.innerHTML = `
     <h1>Hi ${esc(d.customer_first || "there")}</h1>

@@ -28,7 +28,7 @@ Deno.serve(async (req) => {
       sb.from("shop_entries").select("id, kind, photo, body, author_name, created_at")
         .eq("car_id", car.id).eq("shared", true).in("kind", ["photo", "note", "status"])
         .order("created_at", { ascending: false }).limit(300),
-      sb.from("shop_invoices").select("id, number, status, lines, tax_rate, subtotal, tax, total, notes, sent_at, paid_at")
+      sb.from("shop_invoices").select("id, number, status, lines, tax_rate, subtotal, tax, total, notes, work_done, recommendations, sent_at, paid_at")
         .eq("car_id", car.id).in("status", ["sent", "paid"]).order("created_at", { ascending: false }),
     ]);
 

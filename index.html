@@ -125,6 +125,56 @@ function attachMic(btn, ta) {
   };
 }
 
+/* ---------- pick-lists: start typing, pick from what the shop has used before ---------- */
+let picks = null;
+async function loadPicks() {
+  if (picks) return picks;
+  const [items, phrases] = await Promise.all([
+    api.select("shop_items", `select=id,code,description,price,taxable,kind&shop_id=eq.${me.shop.id}&order=use_count.desc,last_used.desc&limit=3000`),
+    api.select("shop_phrases", `select=id,text&shop_id=eq.${me.shop.id}&order=use_count.desc,last_used.desc&limit=3000`),
+  ]);
+  return (picks = { items, phrases });
+}
+function rank(list, q, key, n = 6) {
+  const ws = q.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!ws.length || q.trim().length < 2) return [];
+  return list.filter((x) => { const t = key(x).toLowerCase(); return ws.every((w) => t.includes(w)); }).slice(0, n);
+}
+function attachSuggest(input, getQuery, search, renderItem, onPick) {
+  const box = document.createElement("div"); box.className = "sug"; box.hidden = true;
+  (input.closest(".lcode") || input).insertAdjacentElement("afterend", box);
+  let list = [];
+  const show = async () => {
+    const q = getQuery();
+    if (!q || q.trim().length < 2) { box.hidden = true; return; }
+    const pk = await loadPicks().catch(() => null); if (!pk) return;
+    list = search(pk, q);
+    if (!list.length) { box.hidden = true; return; }
+    box.innerHTML = list.map((x, i) => `<button type="button" data-i="${i}">${renderItem(x)}</button>`).join("");
+    box.hidden = false;
+  };
+  input.addEventListener("input", show);
+  input.addEventListener("blur", () => setTimeout(() => { box.hidden = true; }, 200));
+  box.addEventListener("pointerdown", (e) => { const b = e.target.closest("[data-i]"); if (!b) return; e.preventDefault(); const x = list[+b.dataset.i]; box.hidden = true; onPick(x); });
+}
+function suggestItems(input, onPick) {
+  attachSuggest(input, () => input.value, (pk, q) => rank(pk.items, q, (x) => `${x.code || ""} ${x.description}`),
+    (x) => `<span>${esc(x.description)}</span><span class="sm">${esc(x.code || "")}${x.price != null ? " · " + money(x.price) : ""}</span>`,
+    (x) => { input.value = x.description; onPick(x); });
+}
+function suggestPhrases(ta, after) {
+  const cur = () => ta.value.slice(0, ta.selectionStart ?? ta.value.length).split("\n").pop();
+  attachSuggest(ta, cur, (pk, q) => rank(pk.phrases, q, (x) => x.text), (x) => `<span>${esc(x.text)}</span>`, (x) => {
+    const pos = ta.selectionStart ?? ta.value.length;
+    const start = ta.value.lastIndexOf("\n", pos - 1) + 1;
+    let end = ta.value.indexOf("\n", pos); if (end < 0) end = ta.value.length;
+    ta.value = ta.value.slice(0, start) + x.text + "\n" + ta.value.slice(end).replace(/^\n/, "");
+    const c = start + x.text.length + 1; ta.focus(); try { ta.setSelectionRange(c, c); } catch (_) {}
+    after && after();
+  });
+}
+const learnPhrases = (text) => { const t = String(text || "").split("\n").map((x) => x.trim()).filter(Boolean); if (t.length) { api.rpc("shop_learn_phrases", { sid: me.shop.id, texts: t }).catch(() => {}); picks = null; } };
+
 /* ---------- routing ---------- */
 function route(h) { if (location.hash === h) render(); else location.hash = h; }
 window.addEventListener("hashchange", render);
@@ -225,7 +275,7 @@ function pinPad(code, userId, name) {
         busy("Signing in…");
         try {
           const s = await api.fn("shop-login", { action: "pin", code, user_id: userId, pin }, true);
-          api.setSession(s); me = null; busy(null); close(); route("#/");
+          api.setSession(s); me = null; picks = null; busy(null); close(); route("#/");
         } catch (err) { busy(null); toast(err.message); pin = ""; dots(); }
       }
     });
@@ -298,7 +348,7 @@ function showIntake() {
 
     <div class="section"><button class="btn red block big" type="submit">Check in &amp; make QR code</button></div>
     </form>`;
-  attachMic($("#mic"), $("#v_work"));
+  attachMic($("#mic"), $("#v_work")); suggestPhrases($("#v_work"));
   $("#c_name").addEventListener("input", (e) => { if (!$("#sig_name").dataset.touched) $("#sig_name").value = e.target.value; });
   $("#sig_name").addEventListener("input", (e) => { e.target.dataset.touched = 1; });
 
@@ -338,6 +388,7 @@ function showIntake() {
         patch.waiver_signed_name = $("#sig_name").value.trim() || cust.name;
       }
       if (Object.keys(patch).length) await api.update("shop_cars", `id=eq.${car.id}`, patch);
+      learnPhrases($("#v_work").value);
       await api.insert("shop_entries", { shop_id, car_id: car.id, kind: "status", body: "Checked in", shared: true, author_id: me.user.id, author_name: me.member.display_name });
       busy(null);
       route(`#/car/${car.id}`);
@@ -504,14 +555,14 @@ async function addPartPhotos(car) {
 
 function noteSheet(car) {
   sheet(`<h2>Comment</h2>
-    <textarea class="t" id="nt" placeholder="Talk or type" style="min-height:120px"></textarea>
+    <textarea class="t" id="nt" placeholder="Talk, type, or start typing to pick past work" style="min-height:120px"></textarea>
     <div class="row" style="margin-top:10px">
       <button class="btn ghost mic" id="mic">${ICON.mic}<span> Talk</span></button>
       <button class="btn ghost" id="clean">Clean up</button>
     </div>
     <label style="display:flex;gap:10px;align-items:center;margin:14px 0"><input type="checkbox" id="sh" checked style="width:22px;height:22px"> Customer can see this</label>
     <button class="btn red block big" id="sv">Save</button>`, (el, close) => {
-    const ta = $("#nt", el); attachMic($("#mic", el), ta); setTimeout(() => ta.focus(), 100);
+    const ta = $("#nt", el); attachMic($("#mic", el), ta); suggestPhrases(ta); setTimeout(() => ta.focus(), 100);
     $("#clean", el).onclick = async () => {
       if (!ta.value.trim()) return;
       const b = $("#clean", el); b.disabled = true; b.textContent = "Cleaning…";
@@ -524,6 +575,7 @@ function noteSheet(car) {
       busy("Saving…");
       try {
         await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "note", body: ta.value.trim(), shared: $("#sh", el).checked, author_id: me.user.id, author_name: me.member.display_name });
+        learnPhrases(ta.value);
         await touchCar(car); busy(null); close(); refresh("log");
       } catch (e) { fail(e); }
     };
@@ -610,6 +662,14 @@ function tabParts(box) {
       return { part_number: o.part_number || null, description: o.description || null, brand: null, qty: Number(o.qty) || 1, unit_price: o.unit_price === "" ? null : r2(o.unit_price) };
     };
     $$("input", el).forEach((i) => i.onchange = () => api.update("shop_parts", `id=eq.${id}`, vals()).catch(fail));
+    const din = $('input[data-k="description"]', el);
+    din.parentElement.classList.add("pickwrap");
+    suggestItems(din, (it) => {
+      const pn = $('input[data-k="part_number"]', el), pr = $('input[data-k="unit_price"]', el);
+      if (!pn.value.trim() && it.code) pn.value = it.code;
+      if (it.price != null) pr.value = it.price;
+      api.update("shop_parts", `id=eq.${id}`, vals()).catch(fail);
+    });
     $$("button[data-a]", el).forEach((b) => b.onclick = async () => {
       const a = b.dataset.a;
       try {
@@ -627,15 +687,27 @@ function tabParts(box) {
   };
 }
 
-/* Invoice tab */
+/* Invoice tab — laid out like RAW's own invoices: item code, T for taxable, deposit, shipping */
+const LINE_KIND = { part: "Part", labor: "Labor", other: "Shipping / other", deposit: "Deposit" };
+const lineAmt = (l) => r2((Number(l.qty) || 0) * (Number(l.price) || 0)) * (l.kind === "deposit" ? -1 : 1);
+const isTaxable = (l) => l.kind !== "deposit" && (l.taxable ?? l.kind === "part");
 function invTotals(lines, rate) {
-  let sub = 0, taxable = 0;
-  for (const l of lines) { const amt = r2((Number(l.qty) || 0) * (Number(l.price) || 0)); sub += amt; if (l.kind === "part") taxable += amt; }
-  sub = r2(sub); const tax = r2(taxable * rate); return { subtotal: sub, tax, total: r2(sub + tax) };
+  let sub = 0, taxable = 0, dep = 0;
+  for (const l of lines) { const a = Math.abs(lineAmt(l)); if (l.kind === "deposit") dep += a; else { sub += a; if (isTaxable(l)) taxable += a; } }
+  sub = r2(sub); dep = r2(dep); const tax = r2(taxable * rate);
+  return { subtotal: sub, tax, total: r2(sub + tax - dep) };
+}
+const depositOf = (lines) => r2((lines || []).filter((l) => l.kind === "deposit").reduce((a, l) => a + Math.abs(lineAmt(l)), 0));
+const initials = (n) => String(n || "").split(/\s+/).filter(Boolean).map((w) => w[0].toUpperCase()).join("").slice(0, 3);
+const partLine = (p) => ({ kind: "part", part_id: p.id, code: p.part_number || "", description: p.description || p.part_number || "Part", qty: Number(p.qty) || 1, price: Number(p.unit_price) || 0, taxable: true });
+const laborLine = () => ({ kind: "labor", code: "Labor", description: "RAW in-house labor", qty: 1, price: Number(me.shop.labor_rate) || 0, taxable: false });
+function workFromLog(entries) {
+  return entries.filter((e) => (e.kind === "note" || e.kind === "photo") && e.body).slice().reverse()
+    .flatMap((e) => String(e.body).split("\n")).map((t) => t.replace(/^[-•*\s]+/, "").trim()).filter(Boolean).join("\n");
 }
 
 function tabInvoice(box) {
-  const { car, cust, parts, invoices } = carCache;
+  const { car, cust, parts, invoices, entries } = carCache;
   const draft = invoices.find((i) => i.status === "draft");
   const past = invoices.filter((i) => i.status !== "draft");
   const pastHtml = past.length ? `<div class="section"><h2>Sent invoices</h2>${past.map((i) => `
@@ -645,14 +717,13 @@ function tabInvoice(box) {
 
   if (!draft) {
     const onBill = parts.filter((p) => p.status === "on_bill");
-    box.innerHTML = `<div class="card"><h2>New invoice</h2><p class="muted">${onBill.length} part${onBill.length === 1 ? "" : "s"} on the bill. Labor gets added on the next screen.</p>
+    box.innerHTML = `<div class="card"><h2>New invoice</h2><p class="muted">${onBill.length} part${onBill.length === 1 ? "" : "s"} on the bill. The crew's comments fill in the work performed list. Add labor and anything else on the next screen.</p>
       <button class="btn red block big" id="start">Start invoice</button></div>${pastHtml}`;
     $("#start").onclick = async () => {
       try {
-        const lines = onBill.map((p) => ({ kind: "part", part_id: p.id, description: [p.part_number, p.description].filter(Boolean).join(" — ") || "Part", qty: Number(p.qty) || 1, price: Number(p.unit_price) || 0 }));
-        lines.push({ kind: "labor", description: "Labor", qty: 1, price: Number(me.shop.labor_rate) || 0 });
+        const lines = [...onBill.map(partLine), laborLine()];
         const rate = Number(me.shop.tax_rate) || 0;
-        await api.insert("shop_invoices", { shop_id: me.shop.id, car_id: car.id, lines, tax_rate: rate, ...invTotals(lines, rate) });
+        await api.insert("shop_invoices", { shop_id: me.shop.id, car_id: car.id, lines, tax_rate: rate, work_done: workFromLog(entries) || null, rep: initials(me.member.display_name), ...invTotals(lines, rate) });
         refresh("invoice");
       } catch (e) { fail(e); }
     };
@@ -660,41 +731,63 @@ function tabInvoice(box) {
   }
 
   // keep parts on the bill in sync with the draft
-  const lines = (draft.lines || []).slice();
+  const lines = (draft.lines || []).map((l) => ({ ...l, taxable: l.taxable ?? (l.kind === "part") }));
   const inLines = new Set(lines.filter((l) => l.part_id).map((l) => l.part_id));
-  parts.filter((p) => p.status === "on_bill" && !inLines.has(p.id)).forEach((p) => lines.unshift({ kind: "part", part_id: p.id, description: [p.part_number, p.description].filter(Boolean).join(" — ") || "Part", qty: Number(p.qty) || 1, price: Number(p.unit_price) || 0 }));
+  parts.filter((p) => p.status === "on_bill" && !inLines.has(p.id)).forEach((p) => lines.unshift(partLine(p)));
   const rate = Number(draft.tax_rate) || 0;
+  let workDone = draft.work_done || "", recs = draft.recommendations || "", note = draft.notes || "";
 
   const draw = () => {
-    const t = invTotals(lines, rate);
+    const t = invTotals(lines, rate), dep = depositOf(lines);
     box.innerHTML = `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px"><h2>Draft invoice</h2><span class="small muted">${esc(cust.name)} · ${esc(carName(car))}</span></div>
       <div class="lines">${lines.map((l, i) => `<div class="line" data-i="${i}">
-        <div class="lhead"><span class="tag" style="color:var(--muted)">${l.kind === "part" ? "Part" : l.kind === "labor" ? "Labor" : "Other"}</span><button class="x" data-del="${i}" title="Remove line">✕</button></div>
-        <input class="t" data-k="description" value="${esc(l.description)}" placeholder="Description">
+        <div class="lhead"><span class="tag" style="color:var(--muted)">${LINE_KIND[l.kind] || "Item"}</span>
+          <span style="display:flex;align-items:center;gap:10px">${l.kind === "deposit" ? "" : `<label class="small muted" style="display:flex;gap:6px;align-items:center"><input type="checkbox" data-k="taxable" ${isTaxable(l) ? "checked" : ""} style="width:18px;height:18px">Taxable</label>`}<button class="x" data-del="${i}" title="Remove line">✕</button></span></div>
+        <div class="lcode" ${l.kind === "deposit" ? 'style="grid-template-columns:1fr"' : ""}>
+          ${l.kind === "deposit" ? "" : `<input class="t" data-k="code" value="${esc(l.code || "")}" placeholder="Item code">`}
+          <div class="pickwrap"><input class="t" data-k="description" value="${esc(l.description || "")}" placeholder="${l.kind === "deposit" ? "Deposit (how it was paid, date)" : "Start typing to pick"}" autocomplete="off"></div>
+        </div>
         <div class="lrow">
-          <label><span>${l.kind === "labor" ? "Hours" : "Qty"}</span><input class="t" data-k="qty" type="number" inputmode="decimal" step="any" value="${esc(l.qty)}"></label>
-          <label><span>${l.kind === "labor" ? "Rate" : "Price"}</span><input class="t" data-k="price" type="number" inputmode="decimal" step="0.01" value="${esc(l.price)}"></label>
-          <div class="amt">${money((Number(l.qty) || 0) * (Number(l.price) || 0))}</div>
+          ${l.kind === "deposit" ? "<span></span>" : `<label><span>${l.kind === "labor" ? "Hours" : "Qty"}</span><input class="t" data-k="qty" type="number" inputmode="decimal" step="any" value="${esc(l.qty)}"></label>`}
+          <label><span>${l.kind === "labor" ? "Rate" : l.kind === "deposit" ? "Amount" : "Price each"}</span><input class="t" data-k="price" type="number" inputmode="decimal" step="0.01" value="${esc(l.price)}"></label>
+          <div class="amt">${l.kind === "deposit" ? "−" + money(Math.abs(lineAmt(l))) : money(lineAmt(l))}${isTaxable(l) ? ' <span class="small muted">T</span>' : ""}</div>
         </div></div>`).join("")}</div>
-      <div class="row" style="margin:10px 0"><button class="btn ghost" id="addLabor">+ Labor</button><button class="btn ghost" id="addOther">+ Other</button></div>
-      <div class="totals"><div><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div><span>Tax on parts (${(rate * 100).toFixed(2)}%)</span><span>${money(t.tax)}</span></div><div class="grand"><span>Total</span><span>${money(t.total)}</span></div></div>
-      <label class="f section"><span>Note on invoice (optional)</span><textarea class="t" id="invNote" style="min-height:60px">${esc(draft.notes || "")}</textarea></label>
+      <div class="addrow"><button class="btn ghost" data-add="part">+ Part</button><button class="btn ghost" data-add="labor">+ Labor</button><button class="btn ghost" data-add="other">+ Shipping / other</button><button class="btn ghost" data-add="deposit">+ Deposit</button></div>
+      <div class="totals"><div><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div><span>Sales tax (${(rate * 100).toFixed(2)}%)</span><span>${money(t.tax)}</span></div>${dep ? `<div><span>Deposit paid</span><span>−${money(dep)}</span></div>` : ""}<div class="grand"><span>Total due</span><span>${money(t.total)}</span></div></div>
+      <label class="f section"><span>Work performed (one item per line)</span><textarea class="t" id="invWork" style="min-height:140px" placeholder="Start typing to pick from past work">${esc(workDone)}</textarea></label>
+      <label class="f"><span>Recommendations for next time (optional)</span><textarea class="t" id="invRecs" style="min-height:70px">${esc(recs)}</textarea></label>
+      <label class="f"><span>Note on invoice (optional)</span><textarea class="t" id="invNote" style="min-height:50px">${esc(note)}</textarea></label>
       <div style="display:grid;gap:10px">
         <button class="btn red block big" id="send">${cust.email ? "Send invoice to " + esc(cust.email) : "Finish invoice"}</button>
         <button class="btn ghost block" id="saveD">Save draft</button>
       </div>
       ${me.shop.payment_url ? "" : `<p class="small muted" style="margin-top:10px">Online pay isn't hooked up yet, so the customer sees "call to pay" with the shop's number.</p>`}
     </div>${pastHtml}`;
-    $$(".line input", box).forEach((inp) => inp.onchange = () => { const l = lines[+inp.closest(".line").dataset.i]; l[inp.dataset.k] = inp.dataset.k === "description" ? inp.value : Number(inp.value) || 0; draw(); });
+    $$(".line input", box).forEach((inp) => inp.onchange = () => {
+      const l = lines[+inp.closest(".line").dataset.i], k = inp.dataset.k;
+      l[k] = k === "taxable" ? inp.checked : (k === "description" || k === "code") ? inp.value : Number(inp.value) || 0;
+      if (k !== "description" && k !== "code") draw();
+    });
+    $$('.line input[data-k="description"]', box).forEach((inp) => {
+      const l = lines[+inp.closest(".line").dataset.i];
+      if (l.kind === "deposit") return;
+      suggestItems(inp, (it) => { Object.assign(l, { code: it.code || "", description: it.description, price: Number(it.price ?? l.price) || 0, taxable: it.taxable, kind: l.kind === "part" || l.kind === "other" || l.kind === "labor" ? (it.kind === "labor" ? "labor" : it.kind === "other" ? "other" : "part") : l.kind }); draw(); });
+    });
+    $("#invWork").oninput = (e) => workDone = e.target.value; suggestPhrases($("#invWork"), () => workDone = $("#invWork").value);
+    $("#invRecs").oninput = (e) => recs = e.target.value;
+    $("#invNote").oninput = (e) => note = e.target.value;
     $$("[data-del]", box).forEach((b) => b.onclick = () => { lines.splice(+b.dataset.del, 1); draw(); });
-    $("#addLabor").onclick = () => { lines.push({ kind: "labor", description: "Labor", qty: 1, price: Number(me.shop.labor_rate) || 0 }); draw(); };
-    $("#addOther").onclick = () => { lines.push({ kind: "other", description: "", qty: 1, price: 0 }); draw(); };
+    $$("[data-add]", box).forEach((b) => b.onclick = () => {
+      const k = b.dataset.add;
+      lines.push(k === "labor" ? laborLine() : k === "deposit" ? { kind: "deposit", description: "Deposit for work to be performed", qty: 1, price: 0, taxable: false } : { kind: k, code: k === "other" ? "SHIPPING/HANDLING" : "", description: k === "other" ? "Shipping/handling" : "", qty: 1, price: 0, taxable: k === "part" });
+      draw(); const ins = $$('.line input[data-k="description"]', box); if (k !== "other") ins[ins.length - 1].focus();
+    });
     $("#saveD").onclick = () => saveDraft().then(() => toast("Draft saved")).catch(fail);
     $("#send").onclick = sendIt;
     wirePast(box);
   };
-  const saveDraft = () => api.update("shop_invoices", `id=eq.${draft.id}`, { lines, notes: ($("#invNote") || {}).value || null, ...invTotals(lines, rate), updated_at: new Date().toISOString() });
+  const saveDraft = () => api.update("shop_invoices", `id=eq.${draft.id}`, { lines, work_done: workDone.trim() || null, recommendations: recs.trim() || null, notes: note.trim() || null, ...invTotals(lines, rate), updated_at: new Date().toISOString() });
 
   async function sendIt() {
     if (!lines.length) return toast("Add something to the invoice first");
@@ -703,6 +796,10 @@ function tabInvoice(box) {
       await saveDraft();
       const number = draft.number || await api.rpc("shop_next_invoice_no", { sid: me.shop.id });
       const [inv] = await api.update("shop_invoices", `id=eq.${draft.id}`, { number });
+      // remember parts, charges and work lines for next time
+      api.rpc("shop_learn_items", { sid: me.shop.id, items: lines.filter((l) => l.kind !== "deposit" && l.description).map((l) => ({ code: l.code || "", description: l.description, price: l.price, taxable: isTaxable(l), kind: l.kind })) }).catch(() => {});
+      if (workDone.trim()) api.rpc("shop_learn_phrases", { sid: me.shop.id, texts: workDone.split("\n") }).catch(() => {});
+      picks = null;
       if (cust.email) {
         busy("Emailing invoice…");
         const pdf = await invoicePDF(inv, car, cust);
@@ -737,51 +834,77 @@ function wirePast(box) {
   });
 }
 
-/* Invoice PDF (attached to the email) */
+/* Invoice PDF (attached to the email) — same columns as RAW's: Qty, Item Code, Description, Price Each, Amount (T = taxable) */
 async function invoicePDF(inv, car, cust) {
   const { PDFDocument, StandardFonts, rgb } = PDFLib;
   const doc = await PDFDocument.create();
-  const page = doc.addPage([612, 792]);
   const f = await doc.embedFont(StandardFonts.Helvetica), fb = await doc.embedFont(StandardFonts.HelveticaBold);
-  const shop = me.shop; const red = rgb(0.83, 0.16, 0.18), grey = rgb(0.4, 0.4, 0.4);
-  let y = 740;
-  const clean = (s) => String(s ?? "").replace(/[\r\n\t]+/g, " ").replace(/[^\x20-\x7E\u00A0-\u00FF\u2013\u2014\u2018\u2019\u201C\u201D\u2022\u2026]/g, "");
-  const text = (s, x, yy, o = {}) => page.drawText(clean(s), { x, y: yy, size: o.size || 10, font: o.bold ? fb : f, color: o.color || rgb(0, 0, 0) });
-  const right = (s, x, yy, o = {}) => { const w = (o.bold ? fb : f).widthOfTextAtSize(clean(s), o.size || 10); text(s, x - w, yy, o); };
-  const fit = (s, w, font = f, size = 10) => { s = clean(s); while (s && font.widthOfTextAtSize(s, size) > w) s = s.slice(0, -1); return s; };
-  page.drawRectangle({ x: 0, y: 762, width: 612, height: 30, color: rgb(0.08, 0.08, 0.08) });
-  text(shop.name.toUpperCase(), 48, 772, { size: 14, bold: true, color: rgb(1, 1, 1) });
-  page.drawRectangle({ x: 0, y: 758, width: 612, height: 4, color: red });
-  y = 728;
-  text(shop.address || "", 48, y, { color: grey }); text(shop.phone || "", 48, y - 13, { color: grey }); text(shop.email || "", 48, y - 26, { color: grey });
-  right("INVOICE", 564, y, { size: 20, bold: true });
-  right(`#${inv.number}`, 564, y - 20, { size: 12, bold: true });
-  right(new Date(inv.sent_at || Date.now()).toLocaleDateString("en-US"), 564, y - 34, { color: grey });
-  y = 660;
-  text("BILL TO", 48, y, { size: 8, bold: true, color: grey }); text("VEHICLE", 320, y, { size: 8, bold: true, color: grey });
-  text(cust.name, 48, y - 14, { bold: true }); text(carName(car), 320, y - 14, { bold: true });
-  text(cust.phone || "", 48, y - 27); text(car.color ? `Color: ${car.color}` : "", 320, y - 27);
-  text(cust.email || "", 48, y - 40); text(car.vin ? `VIN: ${car.vin}` : "", 320, y - 40);
-  text(fit(cust.address || "", 250), 48, y - 53);
-  y = 580;
-  page.drawRectangle({ x: 48, y: y - 4, width: 516, height: 18, color: rgb(0.93, 0.93, 0.93) });
-  text("ITEM", 54, y, { size: 8, bold: true }); right("QTY/HRS", 400, y, { size: 8, bold: true }); right("PRICE", 480, y, { size: 8, bold: true }); right("AMOUNT", 558, y, { size: 8, bold: true });
-  y -= 20;
+  const shop = me.shop; const red = rgb(0.83, 0.16, 0.18), grey = rgb(0.4, 0.4, 0.4), line = rgb(0.85, 0.85, 0.85);
+  const clean = (s) => String(s ?? "").replace(/[\r\n\t]+/g, " ").replace(/[^\x20-\x7E -ÿ–—‘’“”•…]/g, "");
+  const W = (s, o = {}) => (o.bold ? fb : f).widthOfTextAtSize(clean(s), o.size || 9);
+  const wrap = (s, w, o = {}) => { const out = []; let cur = ""; for (const word of clean(s).split(" ")) { const t = cur ? cur + " " + word : word; if (W(t, o) > w && cur) { out.push(cur); cur = word; } else cur = t; } if (cur) out.push(cur); return out.length ? out : [""]; };
+  let page, y, n = 0;
+  const text = (s, x, yy, o = {}) => page.drawText(clean(s), { x, y: yy, size: o.size || 9, font: o.bold ? fb : f, color: o.color || rgb(0, 0, 0) });
+  const right = (s, x, yy, o = {}) => text(s, x - W(s, o), yy, o);
+  const COLS = () => { page.drawRectangle({ x: 40, y: y - 4, width: 532, height: 16, color: rgb(0.93, 0.93, 0.93) }); text("QTY", 46, y, { size: 7.5, bold: true }); text("ITEM CODE", 80, y, { size: 7.5, bold: true }); text("DESCRIPTION", 172, y, { size: 7.5, bold: true }); right("PRICE EACH", 490, y, { size: 7.5, bold: true }); right("AMOUNT", 566, y, { size: 7.5, bold: true }); y -= 18; };
+  const newPage = (cols) => {
+    page = doc.addPage([612, 792]); n++;
+    page.drawRectangle({ x: 0, y: 762, width: 612, height: 30, color: rgb(0.08, 0.08, 0.08) });
+    text(shop.name.toUpperCase(), 40, 772, { size: 14, bold: true, color: rgb(1, 1, 1) });
+    right("INVOICE", 572, 772, { size: 12, bold: true, color: rgb(1, 1, 1) });
+    page.drawRectangle({ x: 0, y: 758, width: 612, height: 4, color: red });
+    text(`${shop.phone || ""}   ${shop.email || ""}`, 40, 28, { size: 8, color: grey }); right(`Invoice #${inv.number} · Page ${n}`, 572, 28, { size: 8, color: grey });
+    y = 736; if (cols) COLS();
+  };
+  const need = (h, cols) => { if (y - h < 60) newPage(cols); };
+
+  newPage(false);
+  text(shop.address || "", 40, y, { color: grey });
+  const dt = new Date(inv.sent_at || Date.now()).toLocaleDateString("en-US");
+  [["Date", dt], ["Invoice #", String(inv.number)], ["Terms", "COD"], ["Rep", inv.rep || ""]].forEach(([k, v], i) => { text(k.toUpperCase(), 380 + i * 50, y, { size: 7, bold: true, color: grey }); text(v, 380 + i * 50, y - 12, { bold: true }); });
+  y -= 44;
+  text("BILL TO", 40, y, { size: 7, bold: true, color: grey }); text("VEHICLE", 320, y, { size: 7, bold: true, color: grey });
+  text(cust.name, 40, y - 13, { bold: true, size: 10 }); text(carName(car), 320, y - 13, { bold: true, size: 10 });
+  text(cust.phone || "", 40, y - 25); text([car.color, car.vin ? "VIN " + car.vin : ""].filter(Boolean).join(" · "), 320, y - 25);
+  text(cust.email || "", 40, y - 37); text(wrap(cust.address || "", 250)[0], 40, y - 49);
+  y -= 70; COLS();
+
   for (const l of inv.lines || []) {
-    if (y < 140) { break; }
-    const amt = (Number(l.qty) || 0) * (Number(l.price) || 0);
-    text(fit(`${l.kind === "labor" ? "Labor: " : ""}${l.description || ""}`.replace(/^Labor: Labor$/, "Labor"), 300), 54, y);
-    right(String(l.qty), 400, y); right(money(l.price), 480, y); right(money(amt), 558, y);
-    page.drawLine({ start: { x: 48, y: y - 6 }, end: { x: 564, y: y - 6 }, thickness: 0.5, color: rgb(0.85, 0.85, 0.85) });
-    y -= 20;
+    const desc = wrap(l.description || "", 250);
+    need(desc.length * 11 + 8, true);
+    const amt = lineAmt(l);
+    if (l.kind !== "deposit") right(String(l.qty), 64, y);
+    text(wrap(l.kind === "deposit" ? "DEPOSIT" : (l.code || ""), 86)[0], 80, y);
+    desc.forEach((d, i) => text(d, 172, y - i * 11));
+    right(l.kind === "deposit" ? "-" + money(Math.abs(amt)) : money(l.price), 490, y);
+    right((amt < 0 ? "-" : "") + money(Math.abs(amt)) + (isTaxable(l) ? "T" : " "), 572, y);
+    y -= desc.length * 11 + 4;
+    page.drawLine({ start: { x: 40, y: y + 2 }, end: { x: 572, y: y + 2 }, thickness: 0.5, color: line }); y -= 8;
   }
-  y -= 6;
-  right("Subtotal", 480, y); right(money(inv.subtotal), 558, y); y -= 15;
-  right(`Tax on parts (${(Number(inv.tax_rate) * 100).toFixed(2)}%)`, 480, y); right(money(inv.tax), 558, y); y -= 20;
-  right("TOTAL", 480, y, { bold: true, size: 13 }); right(money(inv.total), 558, y, { bold: true, size: 13 });
-  if (inv.notes) { y -= 34; text("NOTE", 48, y, { size: 8, bold: true, color: grey }); y -= 13; String(inv.notes).split("\n").slice(0, 5).forEach((ln) => { text(fit(ln, 516), 48, y); y -= 13; }); }
-  text(shop.payment_url ? "Pay online from the link in your email." : `To pay, call ${shop.phone || "the shop"}.`, 48, 72, { color: grey });
-  text("Thank you for your business.", 48, 58, { color: grey });
+  need(70, false);
+  y -= 4; const dep = depositOf(inv.lines);
+  right("Subtotal", 490, y); right(money(inv.subtotal), 566, y); y -= 13;
+  right(`Sales tax ${(Number(inv.tax_rate) * 100).toFixed(2)}%`, 490, y); right(money(inv.tax), 566, y); y -= 13;
+  if (dep) { right("Deposit paid", 490, y); right("-" + money(dep), 566, y); y -= 13; }
+  y -= 4; right("TOTAL", 490, y, { bold: true, size: 12 }); right(money(inv.total), 566, y, { bold: true, size: 12 }); y -= 26;
+
+  const section = (title, body, bullets) => {
+    if (!body || !String(body).trim()) return;
+    need(40, false); text(title.toUpperCase(), 40, y, { size: 8, bold: true, color: red }); y -= 14;
+    for (const raw of String(body).split("\n").map((t) => t.replace(/^[-•*\s]+/, "").trim()).filter(Boolean)) {
+      const ls = wrap(raw, bullets ? 510 : 532, { size: 9 });
+      need(ls.length * 12 + 2, false);
+      ls.forEach((t, i) => { if (bullets && i === 0) text("•", 44, y); text(t, bullets ? 56 : 40, y); y -= 12; });
+      y -= 2;
+    }
+    y -= 10;
+  };
+  section("Work performed", inv.work_done, true);
+  section("Recommendations", inv.recommendations, true);
+  section("Note", inv.notes, false);
+  need(30, false);
+  text(shop.payment_url ? "Pay online from the link in your email." : `To pay, call ${shop.phone || "the shop"}.`, 40, y, { color: grey }); y -= 12;
+  text("Thank you for your business.", 40, y, { color: grey });
   return await doc.saveAsBase64();
 }
 

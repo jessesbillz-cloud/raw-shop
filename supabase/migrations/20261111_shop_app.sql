@@ -1,3 +1,5 @@
 -- Applied to project wluvkmpncafugdbunlkw on 2026-11-11 as migrations
 -- `shop_app_core` and `shop_photos_policy_text_safe`. See Supabase migration history for the exact SQL.
 -- 2026-11-11: `shop_pin_login` — shop code + per-person 4-digit PIN (bcrypt, 5 misses = 15 min lock).
+-- 2026-11-11: `shop_picklists` — shop_items / shop_phrases learn from use; seeded from RAW invoice 11702 and the
+-- season service report; invoices gain work_done, recommendations, rep; RAW tax 8.75%, labor $165, numbering from 11703.

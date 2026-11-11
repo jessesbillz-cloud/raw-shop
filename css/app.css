@@ -148,3 +148,14 @@ table.inv input{background:#0f0f10;border:1px solid var(--line);border-radius:6p
 
 .statuspick{display:flex;align-items:center;gap:10px;margin-top:12px}
 .statuspick select{flex:1;padding:10px}
+
+/* pick-list under a field */
+.sug{background:#0b0b0c;border:1px solid var(--line);border-radius:8px;margin-top:4px;overflow:hidden}
+.sug button{display:flex;justify-content:space-between;gap:10px;width:100%;text-align:left;background:none;border:none;border-bottom:1px solid var(--line);padding:11px 12px;font-size:15px;cursor:pointer}
+.sug button:last-child{border-bottom:none}
+.sug button:active,.sug button:hover{background:var(--panel2)}
+.sug .sm{color:var(--muted);font-size:12px;white-space:nowrap;flex:none;align-self:center}
+.lcode{display:grid;grid-template-columns:110px 1fr;gap:8px;align-items:start}
+.lcode .pickwrap{min-width:0}
+.addrow{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:10px 0}
+.addrow .btn{min-height:44px;font-size:14px}
