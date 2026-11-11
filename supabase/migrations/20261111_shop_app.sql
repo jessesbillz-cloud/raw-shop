@@ -1,2 +1,3 @@
 -- Applied to project wluvkmpncafugdbunlkw on 2026-11-11 as migrations
 -- `shop_app_core` and `shop_photos_policy_text_safe`. See Supabase migration history for the exact SQL.
+-- 2026-11-11: `shop_pin_login` — shop code + per-person 4-digit PIN (bcrypt, 5 misses = 15 min lock).

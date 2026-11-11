@@ -143,7 +143,7 @@ async function render() {
 }
 
 async function loadMe() {
-  const rows = await api.select("shop_members", `select=*,shops(*)&user_id=eq.${api.user.id}&active=is.true`);
+  const rows = await api.select("shop_members", `select=shop_id,user_id,display_name,role,active,shops(*)&user_id=eq.${api.user.id}&active=is.true`);
   if (!rows.length) {
     view.innerHTML = `<div class="card"><h2>No shop on this login</h2><p class="muted">Ask the shop owner to add you on the Crew screen.</p><button class="btn ghost" id="so">Sign out</button></div>`;
     $("#so").onclick = () => { api.signOut(); me = null; render(); };
@@ -161,29 +161,74 @@ $("#menuBtn").onclick = () => {
     <div style="display:grid;gap:10px">
       <a class="btn block" href="#/">Cars in the shop</a>
       <a class="btn block" href="#/new">Check in a car</a>
-      ${owner ? '<a class="btn block" href="#/crew">Crew logins</a><a class="btn block" href="#/settings">Shop settings</a>' : ""}
-      <button class="btn ghost block" id="so">Sign out</button>
+      ${owner ? '<a class="btn block" href="#/crew">Crew &amp; PINs</a><a class="btn block" href="#/settings">Shop settings</a>' : ""}
+      <button class="btn ghost block" id="so">Switch person</button>
     </div>`, (el, close) => {
     $$("a", el).forEach((a) => a.addEventListener("click", close));
     $("#so", el).onclick = () => { close(); api.signOut(); me = null; $("#who").textContent = ""; route("#/"); };
   });
 };
 
-/* ---------- login ---------- */
-function showLogin() {
+/* ---------- login: shop code (once per phone) → tap your name → 4-digit PIN ---------- */
+const CODE_KEY = "rawshop.code";
+const getCode = () => { try { return localStorage.getItem(CODE_KEY) || ""; } catch (_) { return ""; } };
+const setCode = (c) => { try { c ? localStorage.setItem(CODE_KEY, c) : localStorage.removeItem(CODE_KEY); } catch (_) {} };
+
+async function showLogin() {
   $("#menuBtn").hidden = true; $("#who").textContent = "";
-  view.innerHTML = `<div style="max-width:420px;margin:30px auto">
-    <h1>Sign in</h1><p class="muted">Use the login the shop gave you.</p>
-    <form id="lf" class="section">
-      <label class="f"><span>Email</span><input class="t" id="em" type="email" autocomplete="username" required></label>
-      <label class="f"><span>Password</span><input class="t" id="pw" type="password" autocomplete="current-password" required></label>
-      <button class="btn red block big" type="submit">Sign in</button>
-    </form></div>`;
-  $("#lf").onsubmit = async (e) => {
-    e.preventDefault(); busy("Signing in…");
-    try { await api.signIn($("#em").value.trim(), $("#pw").value); me = null; busy(null); route("#/"); }
-    catch (err) { busy(null); toast(err.message === "Invalid login credentials" ? "Wrong email or password" : err.message); }
-  };
+  const code = getCode();
+  if (!code) {
+    view.innerHTML = `<div style="max-width:420px;margin:30px auto">
+      <h1>Shop code</h1><p class="muted">Enter it once on this phone.</p>
+      <form id="cf" class="section">
+        <input class="t" id="code" autocapitalize="characters" autocomplete="off" style="font-size:24px;text-align:center;letter-spacing:.2em;text-transform:uppercase" required>
+        <button class="btn red block big section" type="submit">Next</button>
+      </form></div>`;
+    setTimeout(() => $("#code").focus(), 50);
+    $("#cf").onsubmit = async (e) => {
+      e.preventDefault(); const c = $("#code").value.trim().toLowerCase(); busy("Checking…");
+      try { await api.fn("shop-login", { action: "crew", code: c }, true); setCode(c); busy(null); showLogin(); }
+      catch (err) { busy(null); toast(err.message); }
+    };
+    return;
+  }
+  view.innerHTML = `<div class="empty">Loading…</div>`;
+  let d;
+  try { d = await api.fn("shop-login", { action: "crew", code }, true); }
+  catch (err) { if (/code/i.test(err.message)) { setCode(""); return showLogin(); } view.innerHTML = `<div class="empty">${esc(err.message)}</div>`; return; }
+  view.innerHTML = `<div style="max-width:480px;margin:10px auto">
+    <h1>Who's working?</h1><p class="muted">${esc(d.shop)}</p>
+    <div class="section" style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      ${d.crew.map((c) => `<button class="btn big" data-id="${c.id}" data-name="${esc(c.name)}">${esc(c.name)}</button>`).join("") || `<p class="muted">No crew set up yet.</p>`}
+    </div>
+    <button class="back section" id="chg">Different shop code</button></div>`;
+  $("#chg").onclick = () => { setCode(""); showLogin(); };
+  $$("[data-id]", view).forEach((b) => b.onclick = () => pinPad(code, b.dataset.id, b.dataset.name));
+}
+
+function pinPad(code, userId, name) {
+  let pin = "";
+  sheet(`<h2 style="text-align:center">${esc(name)}</h2><p class="muted" style="text-align:center;margin:0">Enter your PIN</p>
+    <div id="dots" style="display:flex;justify-content:center;gap:14px;margin:18px 0">${"<span></span>".repeat(4)}</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;max-width:320px;margin:0 auto">
+      ${[1,2,3,4,5,6,7,8,9,"",0,"⌫"].map((k) => k === "" ? "<span></span>" : `<button class="btn big" data-k="${k}" style="font-size:26px">${k}</button>`).join("")}
+    </div>`, (el, close) => {
+    const dots = () => $$("#dots span", el).forEach((d, i) => d.style.cssText = `width:16px;height:16px;border-radius:50%;border:2px solid var(--text);background:${i < pin.length ? "var(--text)" : "transparent"}`);
+    dots();
+    $$("[data-k]", el).forEach((b) => b.onclick = async () => {
+      const k = b.dataset.k;
+      if (k === "⌫") { pin = pin.slice(0, -1); return dots(); }
+      if (pin.length >= 4) return;
+      pin += k; dots();
+      if (pin.length === 4) {
+        busy("Signing in…");
+        try {
+          const s = await api.fn("shop-login", { action: "pin", code, user_id: userId, pin }, true);
+          api.setSession(s); me = null; busy(null); close(); route("#/");
+        } catch (err) { busy(null); toast(err.message); pin = ""; dots(); }
+      }
+    });
+  });
 }
 
 /* ---------- board ---------- */
@@ -755,25 +800,33 @@ function tabInfo(box) {
 /* ---------- owner: crew + settings ---------- */
 async function showCrew() {
   if (me.member.role !== "owner") return route("#/");
-  view.innerHTML = `<button class="back" onclick="location.hash='#/'">‹ All cars</button><h1>Crew logins</h1><div id="list" class="section"><div class="empty">Loading…</div></div>
+  view.innerHTML = `<button class="back" onclick="location.hash='#/'">‹ All cars</button><h1>Crew &amp; PINs</h1><p class="muted" style="margin:6px 0 0">Shop code: <strong style="color:var(--text);letter-spacing:.1em">${esc(String(me.shop.code || "").toUpperCase())}</strong>. Each phone enters it once, then everyone taps their name and their PIN.</p><div id="list" class="section"><div class="empty">Loading…</div></div>
     <form id="add" class="card section"><h2>Add someone</h2>
       <label class="f section"><span>Name</span><input class="t" id="m_name" required autocapitalize="words"></label>
-      <label class="f"><span>Email (their login)</span><input class="t" id="m_email" type="email" required autocapitalize="off"></label>
-      <label class="f"><span>Starting password (8+ characters)</span><input class="t" id="m_pw" minlength="8" required></label>
+      <label class="f"><span>4-digit PIN</span><input class="t" id="m_pin" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" required></label>
       <label class="f"><span>Access</span><select class="t" id="m_role"><option value="tech">Shop crew</option><option value="owner">Owner (can add crew and change settings)</option></select></label>
       <button class="btn red block" type="submit">Add to crew</button></form>`;
   const load = async () => {
     const rows = await api.select("shop_members", `select=user_id,display_name,role,active&shop_id=eq.${me.shop.id}&order=display_name`);
     $("#list").innerHTML = rows.map((m) => `<div class="entry"><div><strong>${esc(m.display_name)}</strong> <span class="small muted">${m.role === "owner" ? "Owner" : "Crew"}${m.active ? "" : " · turned off"}</span></div>
-      ${m.user_id === me.user.id ? "<span class='small muted'>You</span>" : `<button class="btn ghost" data-u="${m.user_id}" data-a="${m.active ? 0 : 1}" style="min-height:38px;padding:6px 10px">${m.active ? "Turn off" : "Turn on"}</button>`}</div>`).join("");
+      <div class="row" style="flex:0 0 auto;gap:6px"><button class="btn ghost" data-pin="${m.user_id}" data-n="${esc(m.display_name)}" style="min-height:38px;padding:6px 10px">Change PIN</button>${m.user_id === me.user.id ? "" : `<button class="btn ghost" data-u="${m.user_id}" data-a="${m.active ? 0 : 1}" style="min-height:38px;padding:6px 10px">${m.active ? "Turn off" : "Turn on"}</button>`}</div></div>`).join("");
+    $$("#list [data-pin]").forEach((b) => b.onclick = () => sheet(`<h2>New PIN for ${esc(b.dataset.n)}</h2>
+      <input class="t" id="np" inputmode="numeric" maxlength="4" style="font-size:24px;text-align:center;letter-spacing:.3em">
+      <button class="btn red block big section" id="sv">Save PIN</button>`, (el, close) => {
+        setTimeout(() => $("#np", el).focus(), 50);
+        $("#sv", el).onclick = async () => {
+          const pin = $("#np", el).value.trim(); if (!/^\d{4}$/.test(pin)) return toast("PIN is 4 numbers");
+          busy("Saving…"); try { await api.fn("shop-admin", { shop_id: me.shop.id, action: "set_pin", user_id: b.dataset.pin, pin }); busy(null); close(); toast("PIN changed"); } catch (e) { fail(e); }
+        };
+      }));
     $$("#list [data-u]").forEach((b) => b.onclick = async () => { try { await api.fn("shop-admin", { shop_id: me.shop.id, action: "set_active", user_id: b.dataset.u, active: b.dataset.a === "1" }); load(); } catch (e) { fail(e); } });
   };
   load().catch(fail);
   $("#add").onsubmit = async (e) => {
     e.preventDefault(); busy("Adding…");
     try {
-      await api.fn("shop-admin", { shop_id: me.shop.id, action: "add_member", display_name: $("#m_name").value.trim(), email: $("#m_email").value.trim(), password: $("#m_pw").value, role: $("#m_role").value });
-      busy(null); toast("Added. Give them their email and password."); e.target.reset(); load();
+      await api.fn("shop-admin", { shop_id: me.shop.id, action: "add_member", display_name: $("#m_name").value.trim(), pin: $("#m_pin").value.trim(), role: $("#m_role").value });
+      busy(null); toast("Added. They tap their name and enter the PIN."); e.target.reset(); load();
     } catch (err) { fail(err); }
   };
 }

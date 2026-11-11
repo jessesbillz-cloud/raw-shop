@@ -49,6 +49,7 @@
     signedIn() { return !!session; },
     async signIn(email, password) { session = await authCall("token?grant_type=password", { email, password }); save(session); return session.user; },
     signOut() { session = null; save(null); },
+    setSession(j) { session = { access_token: j.access_token, refresh_token: j.refresh_token, expires_at: Math.floor(Date.now() / 1000) + (j.expires_in || 3600), user: j.user }; save(session); },
 
     select: (table, query) => rest("GET", `${table}?${query || "select=*"}`),
     insert: (table, row) => rest("POST", table, row, "return=representation").then((r) => Array.isArray(row) ? r : r[0]),

@@ -1,4 +1,4 @@
-// shop-admin — the shop owner adds crew logins (name + email + password).
+// shop-admin — the shop owner adds crew (name + 4-digit PIN), resets PINs, turns logins off.
 // Crew accounts are tagged app=shop so they never show up as MDR profiles.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -8,16 +8,6 @@ const cors = {
 };
 const json = (b: unknown, status = 200) =>
   new Response(JSON.stringify(b), { status, headers: { ...cors, "Content-Type": "application/json" } });
-
-async function findUserId(sb: any, email: string): Promise<string | null> {
-  for (let page = 1; page <= 20; page++) {
-    const { data } = await sb.auth.admin.listUsers({ page, perPage: 200 });
-    const hit = (data?.users || []).find((x: any) => (x.email || "").toLowerCase() === email);
-    if (hit) return hit.id;
-    if (!data?.users?.length || data.users.length < 200) break;
-  }
-  return null;
-}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
@@ -34,23 +24,31 @@ Deno.serve(async (req) => {
     if (me?.role !== "owner") return json({ error: "Only the shop owner can manage crew." }, 403);
 
     if (body.action === "add_member") {
-      const email = String(body.email || "").trim().toLowerCase();
+      // crew sign in with a 4-digit PIN; the email is an internal placeholder that never gets mail
       const name = String(body.display_name || "").trim();
       const role = body.role === "owner" ? "owner" : "tech";
-      if (!email.includes("@") || !name) return json({ error: "Name and email are required." }, 400);
-      let uid = await findUserId(sb, email);
-      if (!uid) {
-        const pw = String(body.password || "");
-        if (pw.length < 8) return json({ error: "Password needs at least 8 characters." }, 400);
-        const { data: created, error } = await sb.auth.admin.createUser({
-          email, password: pw, email_confirm: true, user_metadata: { app: "shop", full_name: name },
-        });
-        if (error) return json({ error: error.message }, 400);
-        uid = created.user.id;
-      }
-      const { error: e2 } = await sb.from("shop_members").upsert(
-        { shop_id, user_id: uid, display_name: name, role, active: true }, { onConflict: "shop_id,user_id" });
+      const pin = String(body.pin || "");
+      if (!name) return json({ error: "Name is required." }, 400);
+      if (!/^\d{4}$/.test(pin)) return json({ error: "PIN is 4 numbers." }, 400);
+      const email = `crew-${crypto.randomUUID().slice(0, 12)}@crew.mydailyreports.org`;
+      const { data: created, error } = await sb.auth.admin.createUser({
+        email, password: crypto.randomUUID() + crypto.randomUUID(), email_confirm: true,
+        user_metadata: { app: "shop", full_name: name },
+      });
+      if (error) return json({ error: error.message }, 400);
+      const uid = created.user.id;
+      const { error: e2 } = await sb.from("shop_members").insert({ shop_id, user_id: uid, display_name: name, role, active: true });
       if (e2) return json({ error: e2.message }, 400);
+      const { error: e3 } = await sb.rpc("shop_set_pin", { p_shop: shop_id, p_user: uid, p_pin: pin });
+      if (e3) return json({ error: e3.message }, 400);
+      return json({ ok: true });
+    }
+
+    if (body.action === "set_pin") {
+      const pin = String(body.pin || "");
+      if (!/^\d{4}$/.test(pin)) return json({ error: "PIN is 4 numbers." }, 400);
+      const { error } = await sb.rpc("shop_set_pin", { p_shop: shop_id, p_user: body.user_id, p_pin: pin });
+      if (error) return json({ error: error.message }, 400);
       return json({ ok: true });
     }
 
