@@ -22,6 +22,7 @@
 
 <main class="wrap" id="view"></main>
 
+<input type="file" id="snap" accept="image/*" capture="environment" hidden>
 <input type="file" id="pickMany" accept="image/*" multiple hidden>
 <input type="file" id="pickParts" accept="image/*" multiple hidden>
 <input type="file" id="pickOne" accept="image/*" hidden>
@@ -413,7 +414,8 @@ async function showCar(id, tab) {
         </div>
       </div>
     </div>
-    <button class="btn red block" id="aPhotos" style="min-height:76px;font-size:20px;margin-top:16px">${ICON.cam} Add photos</button>
+    <button class="btn red block" id="aPhotos" style="min-height:76px;font-size:20px;margin-top:16px">${ICON.cam} Take photo</button>
+    <div style="text-align:center"><button class="back" id="aLib" style="padding:8px">or pick from your photos</button></div>
     <div class="row" style="margin-top:10px">
       <button class="btn ghost" id="aNote">${ICON.mic} Comment</button>
       <button class="btn ghost" id="aPart">${ICON.part} Part photo</button>
@@ -433,7 +435,8 @@ async function showCar(id, tab) {
   $("#heroPh").onclick = () => urls[car.intake_photo] && lightbox(urls[car.intake_photo]);
   $("#qrBtn").onclick = () => shareSheet(car, cust);
   $("#statusSel").onchange = (e) => setStatus(car, e.target.value);
-  $("#aPhotos").onclick = () => addPhotos(car);
+  $("#aPhotos").onclick = () => addPhotos(car, $("#snap"));
+  $("#aLib").onclick = () => addPhotos(car, $("#pickMany"));
   $("#aPart").onclick = () => addPartPhotos(car);
   $("#aNote").onclick = () => noteSheet(car);
   $$("#tabs button").forEach((b) => { b.classList.toggle("on", b.dataset.t === tab); b.onclick = () => history.replaceState(null, "", `#/car/${car.id}/${b.dataset.t}`) || drawTab(b.dataset.t); });
@@ -458,38 +461,20 @@ async function setStatus(car, s) {
 }
 
 /* Add photos: straight from the camera roll, no sorting */
-async function addPhotos(car) {
-  const files = await pick($("#pickMany"), true);
+async function addPhotos(car, input) {
+  const files = await pick(input, true);
   if (!files.length) return;
-  let firstId = null;
   try {
     for (let i = 0; i < files.length; i++) {
       busy(`Uploading photo ${i + 1} of ${files.length}…`);
       const blob = await shrink(files[i]);
       const path = await api.upload(`${me.shop.id}/${car.id}/${uid()}.jpg`, blob);
-      const row = await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "photo", photo: path, shared: true, author_id: me.user.id, author_name: me.member.display_name });
-      if (i === 0) firstId = row.id;
+      await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "photo", photo: path, shared: true, author_id: me.user.id, author_name: me.member.display_name });
     }
     await touchCar(car); busy(null);
-    await refresh("log");
-    commentSheet(car, firstId, files.length);
+    toast(files.length === 1 ? "Photo added" : `${files.length} photos added`);
+    refresh("log");
   } catch (e) { fail(e); }
-}
-
-/* after photos: say what they show, or skip */
-function commentSheet(car, entryId, count) {
-  sheet(`<h2>${count === 1 ? "Photo added" : count + " photos added"}</h2>
-    <textarea class="t" id="cm" placeholder="Add a comment (optional)" style="min-height:90px"></textarea>
-    <div class="row" style="margin-top:10px"><button class="btn ghost mic" id="mic">${ICON.mic}<span> Talk</span></button></div>
-    <div class="row section"><button class="btn ghost" id="skip">Skip</button><button class="btn red" id="sv">Save</button></div>`, (el, close) => {
-    attachMic($("#mic", el), $("#cm", el));
-    $("#skip", el).onclick = close;
-    $("#sv", el).onclick = async () => {
-      const t = $("#cm", el).value.trim(); if (!t) return close();
-      busy("Saving…");
-      try { await api.update("shop_entries", `id=eq.${entryId}`, { body: t }); busy(null); close(); refresh("log"); } catch (e) { fail(e); }
-    };
-  });
 }
 
 /* Part photo: the only photos the AI reads */
@@ -545,6 +530,26 @@ function noteSheet(car) {
   });
 }
 
+/* full-size photo with a delete button (tap twice so nobody deletes by accident) */
+function photoView(src, entryId) {
+  const d = document.createElement("div"); d.className = "lightbox";
+  d.innerHTML = `<img src="${esc(src)}" alt="">
+    <div style="position:fixed;left:0;right:0;bottom:calc(env(safe-area-inset-bottom,0px) + 18px);display:flex;gap:10px;justify-content:center">
+      <button class="btn ghost" id="lbClose" style="background:#000c">Close</button>
+      <button class="btn" id="lbDel" style="background:#000c;border:1px solid var(--red);color:#ff8a8d">Delete photo</button></div>`;
+  document.body.appendChild(d);
+  d.onclick = (e) => { if (e.target === d || e.target.tagName === "IMG") d.remove(); };
+  $("#lbClose", d).onclick = () => d.remove();
+  const del = $("#lbDel", d);
+  del.onclick = async () => {
+    if (!del.dataset.armed) { del.dataset.armed = 1; del.textContent = "Tap again to delete"; del.style.background = "var(--red)"; del.style.color = "#fff"; return; }
+    const e = carCache.entries.find((x) => x.id === entryId);
+    busy("Deleting…");
+    try { await api.remove("shop_entries", `id=eq.${entryId}`); if (e && e.photo) api.removePhoto(e.photo); busy(null); d.remove(); toast("Photo deleted"); refresh("log"); }
+    catch (err) { fail(err); }
+  };
+}
+
 /* Updates tab: photos grouped by who/when, notes, status changes */
 function tabLog(box) {
   const { car, entries, urls } = carCache;
@@ -560,11 +565,11 @@ function tabLog(box) {
       const first = g.items[0];
       const head = `<div class="meta">${esc(g.author_name || "")} · ${when(first.created_at)}</div>
         <button class="eye ${g.shared ? "on" : ""}" data-g="${gi}" title="Customer can see this">${g.shared ? "Customer sees" : "Shop only"}</button>`;
-      if (g.kind === "photo") return `<div class="entry">${head}${g.items.map((e) => e.body).filter(Boolean).map((b) => `<div class="body">${esc(b)}</div>`).join("")}<div class="pics">${g.items.map((e) => urls[e.photo] ? `<img loading="lazy" src="${esc(urls[e.photo])}" alt="" data-full="${esc(urls[e.photo])}">` : "").join("")}</div></div>`;
+      if (g.kind === "photo") return `<div class="entry">${head}${g.items.map((e) => e.body).filter(Boolean).map((b) => `<div class="body">${esc(b)}</div>`).join("")}<div class="pics">${g.items.map((e) => urls[e.photo] ? `<img loading="lazy" src="${esc(urls[e.photo])}" alt="" data-full="${esc(urls[e.photo])}" data-id="${e.id}">` : "").join("")}</div></div>`;
       if (g.kind === "status") return `<div class="entry">${head}<div class="body"><span class="pill s-${STATUS.find((s) => s[1] === first.body)?.[0] || ""}">${esc(first.body)}</span></div></div>`;
       return `<div class="entry">${head}<div class="body">${esc(first.body)}</div></div>`;
     }).join("") : `<div class="empty">No updates yet. Add photos or talk a note.</div>`);
-  $$(".pics img", box).forEach((i) => i.onclick = () => lightbox(i.dataset.full));
+  $$(".pics img", box).forEach((i) => i.onclick = () => photoView(i.dataset.full, i.dataset.id));
   $$(".eye", box).forEach((b) => b.onclick = async () => {
     const g = groups[+b.dataset.g]; const to = !g.shared;
     try { await api.update("shop_entries", `id=in.(${g.items.map((e) => e.id).join(",")})`, { shared: to }); g.items.forEach((e) => e.shared = to); g.shared = to; b.classList.toggle("on", to); b.textContent = to ? "Customer sees" : "Shop only"; }
