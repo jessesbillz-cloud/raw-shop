@@ -181,12 +181,12 @@ async function showLogin() {
     view.innerHTML = `<div style="max-width:420px;margin:30px auto">
       <h1>Shop code</h1><p class="muted">Enter it once on this phone.</p>
       <form id="cf" class="section">
-        <input class="t" id="code" autocapitalize="characters" autocomplete="off" style="font-size:24px;text-align:center;letter-spacing:.2em;text-transform:uppercase" required>
+        <input class="t" id="code" autocapitalize="characters" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go" style="font-size:24px;text-align:center;letter-spacing:.2em;text-transform:uppercase" required>
         <button class="btn red block big section" type="submit">Next</button>
       </form></div>`;
     setTimeout(() => $("#code").focus(), 50);
     $("#cf").onsubmit = async (e) => {
-      e.preventDefault(); const c = $("#code").value.trim().toLowerCase(); busy("Checking…");
+      e.preventDefault(); const c = $("#code").value.toLowerCase().replace(/[^a-z0-9]/g, ""); busy("Checking…");
       try { await api.fn("shop-login", { action: "crew", code: c }, true); setCode(c); busy(null); showLogin(); }
       catch (err) { busy(null); toast(err.message); }
     };

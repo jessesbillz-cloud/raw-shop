@@ -16,7 +16,7 @@ Deno.serve(async (req) => {
     const URL_ = Deno.env.get("SUPABASE_URL")!;
     const admin = createClient(URL_, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const body = await req.json();
-    const code = String(body.code || "").trim().toLowerCase();
+    const code = String(body.code || "").toLowerCase().replace(/[^a-z0-9]/g, "");
     if (!code) return json({ error: "Enter the shop code." }, 400);
     const { data: shop } = await admin.from("shops").select("id, name").eq("code", code).maybeSingle();
     if (!shop) return json({ error: "That shop code isn't right." }, 404);
