@@ -269,30 +269,20 @@ function showIntake() {
     <form id="inf" autocomplete="off">
     <div class="section"><div class="shot" id="shot">Tap to take a photo of the car</div></div>
 
-    <div class="section"><h2>Customer</h2>
-      <label class="f"><span>Name</span><input class="t" id="c_name" required autocapitalize="words"></label>
-      <div class="grid2">
-        <label class="f"><span>Phone</span><input class="t" id="c_phone" type="tel" inputmode="tel"></label>
-        <label class="f"><span>Email</span><input class="t" id="c_email" type="email" inputmode="email" autocapitalize="off"></label>
-      </div>
-      <label class="f"><span>Address</span><input class="t" id="c_addr" autocapitalize="words"></label>
-    </div>
-
-    <div class="section"><h2>Vehicle</h2>
-      <div class="grid3">
-        <label class="f"><span>Year</span><input class="t" id="v_year" inputmode="numeric" maxlength="4"></label>
-        <label class="f"><span>Make</span><input class="t" id="v_make" autocapitalize="words" placeholder="Jeep, Funco, Ford…"></label>
-        <label class="f"><span>Model</span><input class="t" id="v_model" autocapitalize="words"></label>
-      </div>
-      <div class="grid2">
-        <label class="f"><span>Color</span><input class="t" id="v_color" autocapitalize="words"></label>
-        <label class="f"><span>VIN (optional)</span><input class="t" id="v_vin" autocapitalize="characters"></label>
-      </div>
-    </div>
-
-    <div class="section"><h2>What are we doing?</h2>
-      <textarea class="t" id="v_work" placeholder="Talk or type what the customer wants done"></textarea>
-      <div class="row" style="margin-top:8px"><button type="button" class="btn ghost mic" id="mic">${ICON.mic}<span> Talk</span></button></div>
+    <div class="section">
+      <label class="f"><span>Customer name</span><input class="t" id="c_name" required autocapitalize="words"></label>
+      <label class="f"><span>Phone</span><input class="t" id="c_phone" type="tel" inputmode="tel"></label>
+      <label class="f"><span>What is it?</span><input class="t" id="v_what" autocapitalize="words" placeholder="2015 Jeep JK"></label>
+      <label class="f"><span>What are we doing? (optional)</span><textarea class="t" id="v_work" style="min-height:70px" placeholder="Talk or type"></textarea></label>
+      <button type="button" class="btn ghost mic" id="mic">${ICON.mic}<span> Talk</span></button>
+      <details class="section"><summary class="muted" style="cursor:pointer;padding:6px 0">More (email, address, color, VIN)</summary>
+        <div class="section">
+          <label class="f"><span>Email</span><input class="t" id="c_email" type="email" inputmode="email" autocapitalize="off"></label>
+          <label class="f"><span>Address</span><input class="t" id="c_addr" autocapitalize="words"></label>
+          <div class="grid2"><label class="f"><span>Color</span><input class="t" id="v_color" autocapitalize="words"></label>
+          <label class="f"><span>VIN</span><input class="t" id="v_vin" autocapitalize="characters"></label></div>
+        </div>
+      </details>
     </div>
 
     <div class="section"><h2>Drop-off agreement</h2>
@@ -335,7 +325,7 @@ function showIntake() {
       const shop_id = me.shop.id;
       const cust = await api.insert("shop_customers", { shop_id, name: $("#c_name").value.trim(), phone: $("#c_phone").value.trim() || null, email: $("#c_email").value.trim() || null, address: $("#c_addr").value.trim() || null });
       const car = await api.insert("shop_cars", {
-        shop_id, customer_id: cust.id, year: $("#v_year").value.trim() || null, make: $("#v_make").value.trim() || null, model: $("#v_model").value.trim() || null,
+        shop_id, customer_id: cust.id, ...splitWhat($("#v_what").value),
         color: $("#v_color").value.trim() || null, vin: $("#v_vin").value.trim() || null, work_requested: $("#v_work").value.trim() || null, created_by: me.user.id,
       });
       const patch = {};
@@ -356,6 +346,13 @@ function showIntake() {
   function confirmNoSig() {
     toast("Have the customer sign the drop-off agreement first"); return false;
   }
+}
+
+/* "2015 Jeep JK" -> year 2015, make Jeep, model JK */
+function splitWhat(v) {
+  const t = String(v || "").trim().split(/\s+/).filter(Boolean);
+  const year = /^(19|20)\d{2}$/.test(t[0] || "") ? t.shift() : null;
+  return { year, make: t.shift() || null, model: t.join(" ") || null };
 }
 
 /* QR + send link */
@@ -416,13 +413,14 @@ async function showCar(id, tab) {
         </div>
       </div>
     </div>
-    <div class="statusbar">${STATUS.map(([k, l]) => `<button data-s="${k}" class="${car.status === k ? "on s-" + k : ""}">${l}</button>`).join("")}</div>
-
-    <div class="actions">
-      <button class="act red" id="aPhotos">${ICON.cam}Add photos</button>
-      <button class="act" id="aPart">${ICON.part}Part photo</button>
-      <button class="act" id="aNote">${ICON.mic}Talk a note</button>
+    <button class="btn red block" id="aPhotos" style="min-height:76px;font-size:20px;margin-top:16px">${ICON.cam} Add photos</button>
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost" id="aNote">${ICON.mic} Comment</button>
+      <button class="btn ghost" id="aPart">${ICON.part} Part photo</button>
     </div>
+    <label class="statuspick"><span class="muted small">Status</span>
+      <select class="t" id="statusSel">${STATUS.map(([k, l]) => `<option value="${k}" ${car.status === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+    </label>
 
     <div class="tabs" id="tabs">
       <button data-t="log">Updates</button>
@@ -434,7 +432,7 @@ async function showCar(id, tab) {
 
   $("#heroPh").onclick = () => urls[car.intake_photo] && lightbox(urls[car.intake_photo]);
   $("#qrBtn").onclick = () => shareSheet(car, cust);
-  $$(".statusbar button").forEach((b) => b.onclick = () => setStatus(car, b.dataset.s));
+  $("#statusSel").onchange = (e) => setStatus(car, e.target.value);
   $("#aPhotos").onclick = () => addPhotos(car);
   $("#aPart").onclick = () => addPartPhotos(car);
   $("#aNote").onclick = () => noteSheet(car);
@@ -463,17 +461,35 @@ async function setStatus(car, s) {
 async function addPhotos(car) {
   const files = await pick($("#pickMany"), true);
   if (!files.length) return;
+  let firstId = null;
   try {
     for (let i = 0; i < files.length; i++) {
       busy(`Uploading photo ${i + 1} of ${files.length}…`);
       const blob = await shrink(files[i]);
       const path = await api.upload(`${me.shop.id}/${car.id}/${uid()}.jpg`, blob);
-      await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "photo", photo: path, shared: true, author_id: me.user.id, author_name: me.member.display_name });
+      const row = await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "photo", photo: path, shared: true, author_id: me.user.id, author_name: me.member.display_name });
+      if (i === 0) firstId = row.id;
     }
     await touchCar(car); busy(null);
-    toast(files.length === 1 ? "Photo added" : `${files.length} photos added`);
-    refresh("log");
+    await refresh("log");
+    commentSheet(car, firstId, files.length);
   } catch (e) { fail(e); }
+}
+
+/* after photos: say what they show, or skip */
+function commentSheet(car, entryId, count) {
+  sheet(`<h2>${count === 1 ? "Photo added" : count + " photos added"}</h2>
+    <textarea class="t" id="cm" placeholder="Add a comment (optional)" style="min-height:90px"></textarea>
+    <div class="row" style="margin-top:10px"><button class="btn ghost mic" id="mic">${ICON.mic}<span> Talk</span></button></div>
+    <div class="row section"><button class="btn ghost" id="skip">Skip</button><button class="btn red" id="sv">Save</button></div>`, (el, close) => {
+    attachMic($("#mic", el), $("#cm", el));
+    $("#skip", el).onclick = close;
+    $("#sv", el).onclick = async () => {
+      const t = $("#cm", el).value.trim(); if (!t) return close();
+      busy("Saving…");
+      try { await api.update("shop_entries", `id=eq.${entryId}`, { body: t }); busy(null); close(); refresh("log"); } catch (e) { fail(e); }
+    };
+  });
 }
 
 /* Part photo: the only photos the AI reads */
@@ -502,14 +518,14 @@ async function addPartPhotos(car) {
 }
 
 function noteSheet(car) {
-  sheet(`<h2>Note</h2>
-    <textarea class="t" id="nt" placeholder="Talk or type what got done" style="min-height:140px"></textarea>
+  sheet(`<h2>Comment</h2>
+    <textarea class="t" id="nt" placeholder="Talk or type" style="min-height:120px"></textarea>
     <div class="row" style="margin-top:10px">
       <button class="btn ghost mic" id="mic">${ICON.mic}<span> Talk</span></button>
       <button class="btn ghost" id="clean">Clean up</button>
     </div>
     <label style="display:flex;gap:10px;align-items:center;margin:14px 0"><input type="checkbox" id="sh" checked style="width:22px;height:22px"> Customer can see this</label>
-    <button class="btn red block big" id="sv">Save note</button>`, (el, close) => {
+    <button class="btn red block big" id="sv">Save</button>`, (el, close) => {
     const ta = $("#nt", el); attachMic($("#mic", el), ta); setTimeout(() => ta.focus(), 100);
     $("#clean", el).onclick = async () => {
       if (!ta.value.trim()) return;
@@ -544,7 +560,7 @@ function tabLog(box) {
       const first = g.items[0];
       const head = `<div class="meta">${esc(g.author_name || "")} · ${when(first.created_at)}</div>
         <button class="eye ${g.shared ? "on" : ""}" data-g="${gi}" title="Customer can see this">${g.shared ? "Customer sees" : "Shop only"}</button>`;
-      if (g.kind === "photo") return `<div class="entry">${head}<div class="pics">${g.items.map((e) => urls[e.photo] ? `<img loading="lazy" src="${esc(urls[e.photo])}" alt="" data-full="${esc(urls[e.photo])}">` : "").join("")}</div></div>`;
+      if (g.kind === "photo") return `<div class="entry">${head}${g.items.map((e) => e.body).filter(Boolean).map((b) => `<div class="body">${esc(b)}</div>`).join("")}<div class="pics">${g.items.map((e) => urls[e.photo] ? `<img loading="lazy" src="${esc(urls[e.photo])}" alt="" data-full="${esc(urls[e.photo])}">` : "").join("")}</div></div>`;
       if (g.kind === "status") return `<div class="entry">${head}<div class="body"><span class="pill s-${STATUS.find((s) => s[1] === first.body)?.[0] || ""}">${esc(first.body)}</span></div></div>`;
       return `<div class="entry">${head}<div class="body">${esc(first.body)}</div></div>`;
     }).join("") : `<div class="empty">No updates yet. Add photos or talk a note.</div>`);

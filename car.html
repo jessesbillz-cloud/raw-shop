@@ -84,7 +84,7 @@
       <div class="feed">${groups.length ? groups.map((g) => {
         const e = g.items[0];
         const meta = `<div class="meta">${when(e.created_at)}${e.author_name ? " · " + esc(e.author_name) : ""}</div>`;
-        if (g.kind === "photo") return `<div class="entry">${meta}<div class="pics">${g.items.filter((x) => x.photo).map((x) => `<img loading="lazy" src="${esc(x.photo)}" alt="Shop photo" data-full="${esc(x.photo)}">`).join("")}</div></div>`;
+        if (g.kind === "photo") return `<div class="entry">${meta}${g.items.map((x) => x.body).filter(Boolean).map((b) => `<div class="body">${esc(b)}</div>`).join("")}<div class="pics">${g.items.filter((x) => x.photo).map((x) => `<img loading="lazy" src="${esc(x.photo)}" alt="Shop photo" data-full="${esc(x.photo)}">`).join("")}</div></div>`;
         if (g.kind === "status") return `<div class="entry">${meta}<div class="body"><strong>${esc(e.body)}</strong></div></div>`;
         return `<div class="entry">${meta}<div class="body">${esc(e.body)}</div></div>`;
       }).join("") : `<div class="empty">Photos and notes from the shop will show up here.</div>`}</div>
