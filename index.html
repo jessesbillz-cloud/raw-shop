@@ -1,0 +1,810 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0d0d0d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="RAW Shop">
+<title>RAW Shop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;600;700&display=swap">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="brand"><b>RAW</b> Shop</div>
+  <div class="sp"></div>
+  <div class="who" id="who"></div>
+  <button class="iconbtn" id="menuBtn" hidden>Menu</button>
+</header>
+
+<main class="wrap" id="view"></main>
+
+<input type="file" id="pickMany" accept="image/*" multiple hidden>
+<input type="file" id="pickParts" accept="image/*" multiple hidden>
+<input type="file" id="pickOne" accept="image/*" hidden>
+
+<script src="js/api.js"></script>
+<script src="js/qr.js"></script>
+<script src="js/pdf-lib.min.js"></script>
+<script>
+(() => {
+"use strict";
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const view = $("#view");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const money = (n) => "$" + (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const r2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+const carName = (c) => [c.year, c.make, c.model].filter(Boolean).join(" ") || "Vehicle";
+const when = (t) => { const d = new Date(t); return d.toLocaleDateString([], { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); };
+const STATUS = [
+  ["checked_in", "Checked in"], ["in_progress", "Working on it"], ["waiting_parts", "Waiting on parts"], ["ready", "Ready"], ["picked_up", "Picked up"],
+];
+const statusLabel = (s) => (STATUS.find((x) => x[0] === s) || [, s])[1];
+const PAGE_BASE = location.href.replace(/[#?].*$/, "").replace(/index\.html$/, "").replace(/\/?$/, "/");
+const carLink = (car) => `${PAGE_BASE}car.html?t=${car.public_token}`;
+
+const ICON = {
+  cam: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8h3l2-3h8l2 3h3v11H3z"/><circle cx="12" cy="13" r="4"/></svg>',
+  part: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7l8-4 8 4v10l-8 4-8-4z"/><path d="M4 7l8 4 8-4M12 11v10"/></svg>',
+  mic: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg>',
+};
+
+let me = null;          // { user, member, shop }
+let boardFilter = "open";
+let carCache = null;
+
+/* ---------- small UI helpers ---------- */
+function toast(msg, ms = 2600) {
+  const t = document.createElement("div"); t.className = "toast"; t.textContent = msg;
+  document.body.appendChild(t); setTimeout(() => t.remove(), ms);
+}
+function busy(msg) {
+  let b = $(".busy"); if (!msg) { b && b.remove(); return; }
+  if (!b) { b = document.createElement("div"); b.className = "busy"; document.body.appendChild(b); }
+  b.textContent = msg;
+}
+function sheet(html, onMount) {
+  const bg = document.createElement("div"); bg.className = "sheet-bg";
+  bg.innerHTML = `<div class="sheet" role="dialog">${html}</div>`;
+  bg.addEventListener("click", (e) => { if (e.target === bg) close(); });
+  document.body.appendChild(bg);
+  function close() { bg.remove(); }
+  onMount && onMount(bg.firstElementChild, close);
+  return close;
+}
+function lightbox(src) {
+  const d = document.createElement("div"); d.className = "lightbox"; d.innerHTML = `<img src="${esc(src)}" alt="">`;
+  d.onclick = () => d.remove(); document.body.appendChild(d);
+}
+function pick(input, multiple) {
+  return new Promise((res) => {
+    input.value = "";
+    input.onchange = () => res([...input.files]);
+    input.click();
+  });
+}
+async function fail(e) {
+  busy(null);
+  if (String(e && e.message) === "signed_out") { route("#/login"); return; }
+  console.error(e); toast(e.message || "Something went wrong");
+}
+
+/* resize a phone photo before upload (keeps uploads quick on shop wifi) */
+async function shrink(file, max = 1600, q = 0.82) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((ok, no) => { const i = new Image(); i.onload = () => ok(i); i.onerror = no; i.src = url; });
+    const s = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement("canvas"); c.width = Math.round(img.naturalWidth * s); c.height = Math.round(img.naturalHeight * s);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    return await new Promise((ok) => c.toBlob(ok, "image/jpeg", q));
+  } finally { URL.revokeObjectURL(url); }
+}
+const toB64 = (blob) => new Promise((ok) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.readAsDataURL(blob); });
+
+/* dictation: browser speech if it has it, otherwise the keyboard mic works in any box */
+function attachMic(btn, ta) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { btn.onclick = () => { ta.focus(); toast("Tap the mic on your keyboard to talk"); }; return; }
+  let rec = null;
+  btn.onclick = () => {
+    if (rec) { rec.stop(); return; }
+    rec = new SR(); rec.lang = "en-US"; rec.continuous = true; rec.interimResults = false;
+    const start = ta.value;
+    let said = "";
+    rec.onresult = (e) => { for (let i = e.resultIndex; i < e.results.length; i++) if (e.results[i].isFinal) said += e.results[i][0].transcript + " "; ta.value = (start ? start + " " : "") + said.trim(); };
+    rec.onend = () => { rec = null; btn.classList.remove("on"); btn.lastChild.textContent = " Talk"; };
+    rec.onerror = () => {};
+    rec.start(); btn.classList.add("on"); btn.lastChild.textContent = " Stop";
+  };
+}
+
+/* ---------- routing ---------- */
+function route(h) { if (location.hash === h) render(); else location.hash = h; }
+window.addEventListener("hashchange", render);
+
+async function render() {
+  const h = location.hash || "#/";
+  $("#menuBtn").hidden = !me;
+  if (!api.signedIn()) return showLogin();
+  if (!me) { try { await loadMe(); } catch (e) { return fail(e); } if (!me) return; }
+  window.scrollTo(0, 0);
+  const m = h.match(/^#\/car\/([0-9a-f-]+)(?:\/(\w+))?/);
+  if (h === "#/new") return showIntake();
+  if (m) return showCar(m[1], m[2] || "log");
+  if (h === "#/crew") return showCrew();
+  if (h === "#/settings") return showSettings();
+  return showBoard();
+}
+
+async function loadMe() {
+  const rows = await api.select("shop_members", `select=*,shops(*)&user_id=eq.${api.user.id}&active=is.true`);
+  if (!rows.length) {
+    view.innerHTML = `<div class="card"><h2>No shop on this login</h2><p class="muted">Ask the shop owner to add you on the Crew screen.</p><button class="btn ghost" id="so">Sign out</button></div>`;
+    $("#so").onclick = () => { api.signOut(); me = null; render(); };
+    return;
+  }
+  const r = rows[0];
+  me = { user: api.user, member: r, shop: r.shops };
+  $("#who").textContent = r.display_name;
+  $("#menuBtn").hidden = false;
+}
+
+$("#menuBtn").onclick = () => {
+  const owner = me && me.member.role === "owner";
+  sheet(`<h2>${esc(me.shop.name)}</h2>
+    <div style="display:grid;gap:10px">
+      <a class="btn block" href="#/">Cars in the shop</a>
+      <a class="btn block" href="#/new">Check in a car</a>
+      ${owner ? '<a class="btn block" href="#/crew">Crew logins</a><a class="btn block" href="#/settings">Shop settings</a>' : ""}
+      <button class="btn ghost block" id="so">Sign out</button>
+    </div>`, (el, close) => {
+    $$("a", el).forEach((a) => a.addEventListener("click", close));
+    $("#so", el).onclick = () => { close(); api.signOut(); me = null; $("#who").textContent = ""; route("#/"); };
+  });
+};
+
+/* ---------- login ---------- */
+function showLogin() {
+  $("#menuBtn").hidden = true; $("#who").textContent = "";
+  view.innerHTML = `<div style="max-width:420px;margin:30px auto">
+    <h1>Sign in</h1><p class="muted">Use the login the shop gave you.</p>
+    <form id="lf" class="section">
+      <label class="f"><span>Email</span><input class="t" id="em" type="email" autocomplete="username" required></label>
+      <label class="f"><span>Password</span><input class="t" id="pw" type="password" autocomplete="current-password" required></label>
+      <button class="btn red block big" type="submit">Sign in</button>
+    </form></div>`;
+  $("#lf").onsubmit = async (e) => {
+    e.preventDefault(); busy("Signing in…");
+    try { await api.signIn($("#em").value.trim(), $("#pw").value); me = null; busy(null); route("#/"); }
+    catch (err) { busy(null); toast(err.message === "Invalid login credentials" ? "Wrong email or password" : err.message); }
+  };
+}
+
+/* ---------- board ---------- */
+async function showBoard() {
+  view.innerHTML = `<a class="btn red block big" href="#/new">+ Check in a car</a>
+    <div class="section"><input class="t" id="q" type="search" placeholder="Search name, car, phone" autocomplete="off"></div>
+    <div class="filters" id="filt">
+      ${[["open", "In the shop"], ["ready", "Ready"], ["picked_up", "Picked up"], ["all", "All"]].map(([k, l]) => `<button class="chip ${boardFilter === k ? "on" : ""}" data-f="${k}">${l}</button>`).join("")}
+    </div>
+    <div id="cars" class="cars"><div class="empty">Loading…</div></div>`;
+  $$("#filt .chip").forEach((b) => b.onclick = () => { boardFilter = b.dataset.f; showBoard(); });
+  try {
+    let q = `select=id,year,make,model,color,status,intake_photo,updated_at,shop_customers(name,phone)&shop_id=eq.${me.shop.id}&order=updated_at.desc&limit=300`;
+    if (boardFilter === "open") q += "&status=not.in.(picked_up,ready)";
+    else if (boardFilter !== "all") q += `&status=eq.${boardFilter}`;
+    const cars = await api.select("shop_cars", q);
+    const urls = await api.signed(cars.map((c) => c.intake_photo));
+    const draw = (term) => {
+      const t = (term || "").toLowerCase();
+      const list = cars.filter((c) => !t || [c.shop_customers?.name, c.shop_customers?.phone, c.year, c.make, c.model, c.color].join(" ").toLowerCase().includes(t));
+      $("#cars").innerHTML = list.length ? list.map((c) => `
+        <button class="tile" data-id="${c.id}">
+          <div class="ph ${urls[c.intake_photo] ? "" : "none"}" style="${urls[c.intake_photo] ? `background-image:url('${esc(urls[c.intake_photo])}')` : ""}">${urls[c.intake_photo] ? "" : "RAW"}<span class="pill s-${c.status}">${statusLabel(c.status)}</span></div>
+          <div class="tx"><div class="nm">${esc(c.shop_customers?.name || "No name")}</div><div class="cr">${esc(carName(c))}${c.color ? " · " + esc(c.color) : ""}</div></div>
+        </button>`).join("") : `<div class="empty">${cars.length ? "No match." : "No cars here yet. Tap Check in a car to start one."}</div>`;
+      $$("#cars .tile").forEach((b) => b.onclick = () => route(`#/car/${b.dataset.id}`));
+    };
+    draw("");
+    $("#q").oninput = (e) => draw(e.target.value);
+  } catch (e) { fail(e); }
+}
+
+/* ---------- intake ---------- */
+function showIntake() {
+  let photo = null;
+  view.innerHTML = `<button class="back" onclick="history.back()">‹ Back</button>
+    <h1>Check in a car</h1>
+    <form id="inf" autocomplete="off">
+    <div class="section"><div class="shot" id="shot">Tap to take a photo of the car</div></div>
+
+    <div class="section"><h2>Customer</h2>
+      <label class="f"><span>Name</span><input class="t" id="c_name" required autocapitalize="words"></label>
+      <div class="grid2">
+        <label class="f"><span>Phone</span><input class="t" id="c_phone" type="tel" inputmode="tel"></label>
+        <label class="f"><span>Email</span><input class="t" id="c_email" type="email" inputmode="email" autocapitalize="off"></label>
+      </div>
+      <label class="f"><span>Address</span><input class="t" id="c_addr" autocapitalize="words"></label>
+    </div>
+
+    <div class="section"><h2>Vehicle</h2>
+      <div class="grid3">
+        <label class="f"><span>Year</span><input class="t" id="v_year" inputmode="numeric" maxlength="4"></label>
+        <label class="f"><span>Make</span><input class="t" id="v_make" autocapitalize="words" placeholder="Jeep, Funco, Ford…"></label>
+        <label class="f"><span>Model</span><input class="t" id="v_model" autocapitalize="words"></label>
+      </div>
+      <div class="grid2">
+        <label class="f"><span>Color</span><input class="t" id="v_color" autocapitalize="words"></label>
+        <label class="f"><span>VIN (optional)</span><input class="t" id="v_vin" autocapitalize="characters"></label>
+      </div>
+    </div>
+
+    <div class="section"><h2>What are we doing?</h2>
+      <textarea class="t" id="v_work" placeholder="Talk or type what the customer wants done"></textarea>
+      <div class="row" style="margin-top:8px"><button type="button" class="btn ghost mic" id="mic">${ICON.mic}<span> Talk</span></button></div>
+    </div>
+
+    <div class="section"><h2>Drop-off agreement</h2>
+      <div class="waiver">${esc(me.shop.waiver_text || "")}</div>
+      <p class="small muted" style="margin:10px 0 6px">Customer signs here</p>
+      <canvas class="sig" id="sig"></canvas>
+      <div class="row" style="margin-top:8px">
+        <input class="t" id="sig_name" placeholder="Printed name">
+        <button type="button" class="btn ghost" id="sigClear" style="flex:0 0 auto">Clear</button>
+      </div>
+    </div>
+
+    <div class="section"><button class="btn red block big" type="submit">Check in &amp; make QR code</button></div>
+    </form>`;
+  attachMic($("#mic"), $("#v_work"));
+  $("#c_name").addEventListener("input", (e) => { if (!$("#sig_name").dataset.touched) $("#sig_name").value = e.target.value; });
+  $("#sig_name").addEventListener("input", (e) => { e.target.dataset.touched = 1; });
+
+  $("#shot").onclick = async () => {
+    const [f] = await pick($("#pickOne")); if (!f) return;
+    photo = await shrink(f);
+    $("#shot").style.backgroundImage = `url('${URL.createObjectURL(photo)}')`; $("#shot").classList.add("has"); $("#shot").textContent = "";
+  };
+
+  // signature pad
+  const cv = $("#sig"), ctx = cv.getContext("2d"); let drawn = false, down = false;
+  const size = () => { const r = cv.getBoundingClientRect(); cv.width = r.width * 2; cv.height = r.height * 2; ctx.scale(2, 2); ctx.lineWidth = 2.4; ctx.lineCap = "round"; ctx.strokeStyle = "#111"; };
+  size();
+  const pt = (e) => { const r = cv.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  cv.onpointerdown = (e) => { down = true; cv.setPointerCapture(e.pointerId); ctx.beginPath(); ctx.moveTo(...pt(e)); };
+  cv.onpointermove = (e) => { if (!down) return; ctx.lineTo(...pt(e)); ctx.stroke(); drawn = true; };
+  cv.onpointerup = () => { down = false; };
+  $("#sigClear").onclick = () => { ctx.clearRect(0, 0, cv.width, cv.height); drawn = false; };
+
+  $("#inf").onsubmit = async (e) => {
+    e.preventDefault();
+    if (!drawn && !confirmNoSig()) return;
+    busy("Checking in…");
+    try {
+      const shop_id = me.shop.id;
+      const cust = await api.insert("shop_customers", { shop_id, name: $("#c_name").value.trim(), phone: $("#c_phone").value.trim() || null, email: $("#c_email").value.trim() || null, address: $("#c_addr").value.trim() || null });
+      const car = await api.insert("shop_cars", {
+        shop_id, customer_id: cust.id, year: $("#v_year").value.trim() || null, make: $("#v_make").value.trim() || null, model: $("#v_model").value.trim() || null,
+        color: $("#v_color").value.trim() || null, vin: $("#v_vin").value.trim() || null, work_requested: $("#v_work").value.trim() || null, created_by: me.user.id,
+      });
+      const patch = {};
+      if (photo) patch.intake_photo = await api.upload(`${shop_id}/${car.id}/intake-${uid()}.jpg`, photo);
+      if (drawn) {
+        const png = await new Promise((ok) => cv.toBlob(ok, "image/png"));
+        patch.waiver_signature = await api.upload(`${shop_id}/${car.id}/signature-${uid()}.png`, png);
+        patch.waiver_signed_at = new Date().toISOString();
+        patch.waiver_signed_name = $("#sig_name").value.trim() || cust.name;
+      }
+      if (Object.keys(patch).length) await api.update("shop_cars", `id=eq.${car.id}`, patch);
+      await api.insert("shop_entries", { shop_id, car_id: car.id, kind: "status", body: "Checked in", shared: true, author_id: me.user.id, author_name: me.member.display_name });
+      busy(null);
+      route(`#/car/${car.id}`);
+      setTimeout(() => shareSheet({ ...car, ...patch }, cust, true), 300);
+    } catch (err) { fail(err); }
+  };
+  function confirmNoSig() {
+    toast("Have the customer sign the drop-off agreement first"); return false;
+  }
+}
+
+/* QR + send link */
+function shareSheet(car, cust, fresh) {
+  const link = carLink(car);
+  const msg = `${me.shop.name}: here's the page for your ${carName(car)}. Photos and updates show up here as we work: ${link}`;
+  sheet(`<h2>${fresh ? "Checked in" : "Customer link"}</h2>
+    <p class="muted" style="margin-top:0">${esc(cust.name)} can scan this or open the link to follow the build.</p>
+    <div style="text-align:center;margin:10px 0"><div class="qr">${qrSVG(link, 220)}</div></div>
+    <div class="copy" id="lnk">${esc(link)}</div>
+    <div style="display:grid;gap:10px;margin-top:14px">
+      ${cust.phone ? `<a class="btn red block" href="sms:${esc(cust.phone)}?&body=${encodeURIComponent(msg)}">Text it to ${esc(cust.name.split(" ")[0])}</a>` : ""}
+      ${cust.email ? `<button class="btn block" id="em">Email it to ${esc(cust.email)}</button>` : ""}
+      <button class="btn ghost block" id="cp">Copy link</button>
+      <button class="btn ghost block" id="dn">Done</button>
+    </div>`, (el, close) => {
+    $("#dn", el).onclick = close;
+    $("#cp", el).onclick = async () => { try { await navigator.clipboard.writeText(link); toast("Link copied"); } catch (_) { const r = document.createRange(); r.selectNodeContents($("#lnk", el)); getSelection().removeAllRanges(); getSelection().addRange(r); toast("Link selected — copy it"); } };
+    const em = $("#em", el);
+    if (em) em.onclick = async () => {
+      busy("Sending email…");
+      try { await api.fn("shop-send", { shop_id: me.shop.id, car_id: car.id, kind: "link", page_url: link }); busy(null); toast("Emailed"); close(); }
+      catch (e) { fail(e); }
+    };
+  });
+}
+
+/* ---------- car file ---------- */
+async function loadCar(id) {
+  const [cars, entries, parts, invoices] = await Promise.all([
+    api.select("shop_cars", `select=*,shop_customers(*)&id=eq.${id}`),
+    api.select("shop_entries", `select=*&car_id=eq.${id}&order=created_at.desc`),
+    api.select("shop_parts", `select=*&car_id=eq.${id}&status=neq.removed&order=created_at.asc`),
+    api.select("shop_invoices", `select=*&car_id=eq.${id}&order=created_at.desc`),
+  ]);
+  if (!cars.length) throw new Error("That car isn't in this shop.");
+  const car = cars[0];
+  const urls = await api.signed([car.intake_photo, car.waiver_signature, ...entries.map((e) => e.photo)]);
+  carCache = { car, cust: car.shop_customers, entries, parts, invoices, urls };
+  return carCache;
+}
+
+async function showCar(id, tab) {
+  view.innerHTML = `<div class="empty">Loading…</div>`;
+  let d;
+  try { d = await loadCar(id); } catch (e) { return fail(e); }
+  const { car, cust, entries, parts, invoices, urls } = d;
+  const potential = parts.filter((p) => p.status === "potential").length;
+  view.innerHTML = `<button class="back" onclick="location.hash='#/'">‹ All cars</button>
+    <div class="hero">
+      <div class="ph" style="${urls[car.intake_photo] ? `background-image:url('${esc(urls[car.intake_photo])}')` : ""}" id="heroPh"></div>
+      <div style="min-width:0">
+        <h1 style="overflow-wrap:anywhere">${esc(cust.name)}</h1>
+        <div class="muted">${esc(carName(car))}${car.color ? " · " + esc(car.color) : ""}</div>
+        <div class="row" style="margin-top:8px;gap:8px">
+          ${cust.phone ? `<a class="btn ghost" style="min-height:40px;padding:8px 12px" href="tel:${esc(cust.phone)}">Call</a>` : ""}
+          <button class="btn ghost" style="min-height:40px;padding:8px 12px" id="qrBtn">QR / link</button>
+        </div>
+      </div>
+    </div>
+    <div class="statusbar">${STATUS.map(([k, l]) => `<button data-s="${k}" class="${car.status === k ? "on s-" + k : ""}">${l}</button>`).join("")}</div>
+
+    <div class="actions">
+      <button class="act red" id="aPhotos">${ICON.cam}Add photos</button>
+      <button class="act" id="aPart">${ICON.part}Part photo</button>
+      <button class="act" id="aNote">${ICON.mic}Talk a note</button>
+    </div>
+
+    <div class="tabs" id="tabs">
+      <button data-t="log">Updates</button>
+      <button data-t="parts">Parts${potential ? `<span class="n">${potential}</span>` : ""}</button>
+      <button data-t="invoice">Invoice</button>
+      <button data-t="info">Info</button>
+    </div>
+    <div id="tabBody" class="section"></div>`;
+
+  $("#heroPh").onclick = () => urls[car.intake_photo] && lightbox(urls[car.intake_photo]);
+  $("#qrBtn").onclick = () => shareSheet(car, cust);
+  $$(".statusbar button").forEach((b) => b.onclick = () => setStatus(car, b.dataset.s));
+  $("#aPhotos").onclick = () => addPhotos(car);
+  $("#aPart").onclick = () => addPartPhotos(car);
+  $("#aNote").onclick = () => noteSheet(car);
+  $$("#tabs button").forEach((b) => { b.classList.toggle("on", b.dataset.t === tab); b.onclick = () => history.replaceState(null, "", `#/car/${car.id}/${b.dataset.t}`) || drawTab(b.dataset.t); });
+  drawTab(tab);
+}
+
+function drawTab(tab) {
+  $$("#tabs button").forEach((b) => b.classList.toggle("on", b.dataset.t === tab));
+  const box = $("#tabBody");
+  ({ log: tabLog, parts: tabParts, invoice: tabInvoice, info: tabInfo }[tab] || tabLog)(box);
+}
+const refresh = async (tab) => { const t = tab || ($("#tabs .on") || {}).dataset?.t || "log"; await showCar(carCache.car.id, t); };
+const touchCar = (car) => api.update("shop_cars", `id=eq.${car.id}`, { updated_at: new Date().toISOString() }).catch(() => {});
+
+async function setStatus(car, s) {
+  if (s === car.status) return;
+  try {
+    await api.update("shop_cars", `id=eq.${car.id}`, { status: s, updated_at: new Date().toISOString() });
+    await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "status", body: statusLabel(s), shared: true, author_id: me.user.id, author_name: me.member.display_name });
+    toast(statusLabel(s)); refresh();
+  } catch (e) { fail(e); }
+}
+
+/* Add photos: straight from the camera roll, no sorting */
+async function addPhotos(car) {
+  const files = await pick($("#pickMany"), true);
+  if (!files.length) return;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      busy(`Uploading photo ${i + 1} of ${files.length}…`);
+      const blob = await shrink(files[i]);
+      const path = await api.upload(`${me.shop.id}/${car.id}/${uid()}.jpg`, blob);
+      await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "photo", photo: path, shared: true, author_id: me.user.id, author_name: me.member.display_name });
+    }
+    await touchCar(car); busy(null);
+    toast(files.length === 1 ? "Photo added" : `${files.length} photos added`);
+    refresh("log");
+  } catch (e) { fail(e); }
+}
+
+/* Part photo: the only photos the AI reads */
+async function addPartPhotos(car) {
+  const files = await pick($("#pickParts"), true);
+  if (!files.length) return;
+  let found = 0, missed = 0;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      busy(`Reading part ${i + 1} of ${files.length}…`);
+      const blob = await shrink(files[i], 2000, 0.88);
+      const path = await api.upload(`${me.shop.id}/${car.id}/part-${uid()}.jpg`, blob);
+      const entry = await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "part_photo", photo: path, shared: false, author_id: me.user.id, author_name: me.member.display_name });
+      let r = { found: false };
+      try { r = await api.fn("shop-ai", { shop_id: me.shop.id, mode: "part", image_base64: await toB64(blob) }); } catch (_) {}
+      await api.insert("shop_parts", {
+        shop_id: me.shop.id, car_id: car.id, entry_id: entry.id, created_by: me.user.id, status: "potential",
+        part_number: r.found ? r.part_number : null, brand: r.found ? (r.brand || null) : null, description: r.found ? (r.description || null) : null,
+      });
+      r.found ? found++ : missed++;
+    }
+    await touchCar(car); busy(null);
+    toast(missed ? `${found} read, ${missed} need the number typed in` : `${found} part${found === 1 ? "" : "s"} added to the list`, 3600);
+    refresh("parts");
+  } catch (e) { fail(e); }
+}
+
+function noteSheet(car) {
+  sheet(`<h2>Note</h2>
+    <textarea class="t" id="nt" placeholder="Talk or type what got done" style="min-height:140px"></textarea>
+    <div class="row" style="margin-top:10px">
+      <button class="btn ghost mic" id="mic">${ICON.mic}<span> Talk</span></button>
+      <button class="btn ghost" id="clean">Clean up</button>
+    </div>
+    <label style="display:flex;gap:10px;align-items:center;margin:14px 0"><input type="checkbox" id="sh" checked style="width:22px;height:22px"> Customer can see this</label>
+    <button class="btn red block big" id="sv">Save note</button>`, (el, close) => {
+    const ta = $("#nt", el); attachMic($("#mic", el), ta); setTimeout(() => ta.focus(), 100);
+    $("#clean", el).onclick = async () => {
+      if (!ta.value.trim()) return;
+      const b = $("#clean", el); b.disabled = true; b.textContent = "Cleaning…";
+      try { const r = await api.fn("shop-ai", { shop_id: me.shop.id, mode: "cleanup", text: ta.value }); if (r.text) ta.value = r.text; }
+      catch (e) { toast(e.message); }
+      b.disabled = false; b.textContent = "Clean up";
+    };
+    $("#sv", el).onclick = async () => {
+      if (!ta.value.trim()) return toast("Nothing to save");
+      busy("Saving…");
+      try {
+        await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "note", body: ta.value.trim(), shared: $("#sh", el).checked, author_id: me.user.id, author_name: me.member.display_name });
+        await touchCar(car); busy(null); close(); refresh("log");
+      } catch (e) { fail(e); }
+    };
+  });
+}
+
+/* Updates tab: photos grouped by who/when, notes, status changes */
+function tabLog(box) {
+  const { car, entries, urls } = carCache;
+  const items = entries.filter((e) => e.kind !== "part_photo");
+  const groups = [];
+  for (const e of items) {
+    const g = groups[groups.length - 1];
+    if (g && e.kind === "photo" && g.kind === "photo" && g.author_id === e.author_id && g.shared === e.shared && Math.abs(new Date(g.items[g.items.length - 1].created_at) - new Date(e.created_at)) < 15 * 60 * 1000) g.items.push(e);
+    else groups.push({ kind: e.kind, author_id: e.author_id, author_name: e.author_name, shared: e.shared, items: [e] });
+  }
+  box.innerHTML = (car.work_requested ? `<div class="card" style="margin-bottom:6px"><div class="tag">Work requested</div><div style="white-space:pre-wrap;margin-top:4px">${esc(car.work_requested)}</div></div>` : "") +
+    (groups.length ? groups.map((g, gi) => {
+      const first = g.items[0];
+      const head = `<div class="meta">${esc(g.author_name || "")} · ${when(first.created_at)}</div>
+        <button class="eye ${g.shared ? "on" : ""}" data-g="${gi}" title="Customer can see this">${g.shared ? "Customer sees" : "Shop only"}</button>`;
+      if (g.kind === "photo") return `<div class="entry">${head}<div class="pics">${g.items.map((e) => urls[e.photo] ? `<img loading="lazy" src="${esc(urls[e.photo])}" alt="" data-full="${esc(urls[e.photo])}">` : "").join("")}</div></div>`;
+      if (g.kind === "status") return `<div class="entry">${head}<div class="body"><span class="pill s-${STATUS.find((s) => s[1] === first.body)?.[0] || ""}">${esc(first.body)}</span></div></div>`;
+      return `<div class="entry">${head}<div class="body">${esc(first.body)}</div></div>`;
+    }).join("") : `<div class="empty">No updates yet. Add photos or talk a note.</div>`);
+  $$(".pics img", box).forEach((i) => i.onclick = () => lightbox(i.dataset.full));
+  $$(".eye", box).forEach((b) => b.onclick = async () => {
+    const g = groups[+b.dataset.g]; const to = !g.shared;
+    try { await api.update("shop_entries", `id=in.(${g.items.map((e) => e.id).join(",")})`, { shared: to }); g.items.forEach((e) => e.shared = to); g.shared = to; b.classList.toggle("on", to); b.textContent = to ? "Customer sees" : "Shop only"; }
+    catch (e) { fail(e); }
+  });
+}
+
+/* Parts tab: potential list from part photos → shop decides what goes on the bill */
+function tabParts(box) {
+  const { parts, entries, urls } = carCache;
+  const photoOf = (p) => { const e = entries.find((x) => x.id === p.entry_id); return e && urls[e.photo]; };
+  const pot = parts.filter((p) => p.status === "potential"), bill = parts.filter((p) => p.status === "on_bill");
+  const row = (p, onBill) => `<div class="part" data-id="${p.id}">
+      <div style="display:flex;gap:10px;min-width:0">
+        ${photoOf(p) ? `<img src="${esc(photoOf(p))}" alt="" data-full="${esc(photoOf(p))}">` : ""}
+        <div style="min-width:0;flex:1">
+          <input class="t pn" data-k="part_number" value="${esc(p.part_number || "")}" placeholder="Part number" style="padding:8px">
+          <input class="t" data-k="description" value="${esc([p.brand, p.description].filter(Boolean).join(" "))}" placeholder="Description" style="padding:8px;margin-top:6px">
+        </div>
+      </div>
+      <div></div>
+      <div class="ctl">
+        <span class="small muted">Qty</span><input class="t" data-k="qty" type="number" inputmode="decimal" step="any" value="${esc(p.qty)}" style="padding:8px">
+        <span class="small muted">Price</span><input class="t" data-k="unit_price" type="number" inputmode="decimal" step="0.01" value="${p.unit_price ?? ""}" placeholder="0.00" style="padding:8px">
+        <span style="flex:1"></span>
+        ${onBill ? `<button class="btn ghost" data-a="off" style="min-height:40px">Take off bill</button>` : `<button class="btn red" data-a="bill" style="min-height:40px">Add to bill</button><button class="x" data-a="del" title="Remove">✕</button>`}
+      </div>
+    </div>`;
+  box.innerHTML = `<div class="row" style="margin-bottom:6px"><button class="btn ghost" id="addHand">+ Add a part by hand</button></div>
+    <div class="section"><h2>Possible parts</h2><p class="small muted" style="margin:4px 0 0">From part photos. Nothing here is on the bill until you add it.</p>
+      ${pot.length ? pot.map((p) => row(p, false)).join("") : `<div class="empty" style="padding:20px">No part photos yet.</div>`}</div>
+    <div class="section"><h2>On the bill</h2>${bill.length ? bill.map((p) => row(p, true)).join("") : `<div class="empty" style="padding:20px">Nothing on the bill yet.</div>`}</div>`;
+  $$(".part img", box).forEach((i) => i.onclick = () => lightbox(i.dataset.full));
+  $$(".part", box).forEach((el) => {
+    const id = el.dataset.id;
+    const vals = () => {
+      const o = {}; $$("input", el).forEach((i) => o[i.dataset.k] = i.value.trim());
+      return { part_number: o.part_number || null, description: o.description || null, brand: null, qty: Number(o.qty) || 1, unit_price: o.unit_price === "" ? null : r2(o.unit_price) };
+    };
+    $$("input", el).forEach((i) => i.onchange = () => api.update("shop_parts", `id=eq.${id}`, vals()).catch(fail));
+    $$("button[data-a]", el).forEach((b) => b.onclick = async () => {
+      const a = b.dataset.a;
+      try {
+        if (a === "bill") {
+          const v = vals(); if (v.unit_price == null) { toast("Put a price on it first"); return; }
+          await api.update("shop_parts", `id=eq.${id}`, { ...v, status: "on_bill" }); toast("On the bill");
+        } else if (a === "off") await api.update("shop_parts", `id=eq.${id}`, { status: "potential" });
+        else if (a === "del") await api.update("shop_parts", `id=eq.${id}`, { status: "removed" });
+        refresh("parts");
+      } catch (e) { fail(e); }
+    });
+  });
+  $("#addHand").onclick = async () => {
+    try { await api.insert("shop_parts", { shop_id: me.shop.id, car_id: carCache.car.id, status: "potential", created_by: me.user.id }); refresh("parts"); } catch (e) { fail(e); }
+  };
+}
+
+/* Invoice tab */
+function invTotals(lines, rate) {
+  let sub = 0, taxable = 0;
+  for (const l of lines) { const amt = r2((Number(l.qty) || 0) * (Number(l.price) || 0)); sub += amt; if (l.kind === "part") taxable += amt; }
+  sub = r2(sub); const tax = r2(taxable * rate); return { subtotal: sub, tax, total: r2(sub + tax) };
+}
+
+function tabInvoice(box) {
+  const { car, cust, parts, invoices } = carCache;
+  const draft = invoices.find((i) => i.status === "draft");
+  const past = invoices.filter((i) => i.status !== "draft");
+  const pastHtml = past.length ? `<div class="section"><h2>Sent invoices</h2>${past.map((i) => `
+      <div class="entry"><div><strong>#${i.number}</strong> · ${money(i.total)} <span class="pill ${i.status === "paid" ? "s-ready" : "s-waiting_parts"}">${i.status === "paid" ? "Paid" : "Sent"}</span></div>
+      <div class="row" style="flex:0 0 auto;gap:6px">${i.status !== "paid" ? `<button class="btn ghost" data-paid="${i.id}" style="min-height:38px;padding:6px 10px">Mark paid</button>` : ""}<button class="btn ghost" data-resend="${i.id}" style="min-height:38px;padding:6px 10px">Resend</button></div>
+      <div class="meta">${i.sent_at ? "Sent " + when(i.sent_at) : ""}${i.paid_at ? " · Paid " + when(i.paid_at) : ""}</div></div>`).join("")}</div>` : "";
+
+  if (!draft) {
+    const onBill = parts.filter((p) => p.status === "on_bill");
+    box.innerHTML = `<div class="card"><h2>New invoice</h2><p class="muted">${onBill.length} part${onBill.length === 1 ? "" : "s"} on the bill. Labor gets added on the next screen.</p>
+      <button class="btn red block big" id="start">Start invoice</button></div>${pastHtml}`;
+    $("#start").onclick = async () => {
+      try {
+        const lines = onBill.map((p) => ({ kind: "part", part_id: p.id, description: [p.part_number, p.description].filter(Boolean).join(" — ") || "Part", qty: Number(p.qty) || 1, price: Number(p.unit_price) || 0 }));
+        lines.push({ kind: "labor", description: "Labor", qty: 1, price: Number(me.shop.labor_rate) || 0 });
+        const rate = Number(me.shop.tax_rate) || 0;
+        await api.insert("shop_invoices", { shop_id: me.shop.id, car_id: car.id, lines, tax_rate: rate, ...invTotals(lines, rate) });
+        refresh("invoice");
+      } catch (e) { fail(e); }
+    };
+    wirePast(box); return;
+  }
+
+  // keep parts on the bill in sync with the draft
+  const lines = (draft.lines || []).slice();
+  const inLines = new Set(lines.filter((l) => l.part_id).map((l) => l.part_id));
+  parts.filter((p) => p.status === "on_bill" && !inLines.has(p.id)).forEach((p) => lines.unshift({ kind: "part", part_id: p.id, description: [p.part_number, p.description].filter(Boolean).join(" — ") || "Part", qty: Number(p.qty) || 1, price: Number(p.unit_price) || 0 }));
+  const rate = Number(draft.tax_rate) || 0;
+
+  const draw = () => {
+    const t = invTotals(lines, rate);
+    box.innerHTML = `<div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:10px"><h2>Draft invoice</h2><span class="small muted">${esc(cust.name)} · ${esc(carName(car))}</span></div>
+      <div class="lines">${lines.map((l, i) => `<div class="line" data-i="${i}">
+        <div class="lhead"><span class="tag" style="color:var(--muted)">${l.kind === "part" ? "Part" : l.kind === "labor" ? "Labor" : "Other"}</span><button class="x" data-del="${i}" title="Remove line">✕</button></div>
+        <input class="t" data-k="description" value="${esc(l.description)}" placeholder="Description">
+        <div class="lrow">
+          <label><span>${l.kind === "labor" ? "Hours" : "Qty"}</span><input class="t" data-k="qty" type="number" inputmode="decimal" step="any" value="${esc(l.qty)}"></label>
+          <label><span>${l.kind === "labor" ? "Rate" : "Price"}</span><input class="t" data-k="price" type="number" inputmode="decimal" step="0.01" value="${esc(l.price)}"></label>
+          <div class="amt">${money((Number(l.qty) || 0) * (Number(l.price) || 0))}</div>
+        </div></div>`).join("")}</div>
+      <div class="row" style="margin:10px 0"><button class="btn ghost" id="addLabor">+ Labor</button><button class="btn ghost" id="addOther">+ Other</button></div>
+      <div class="totals"><div><span>Subtotal</span><span>${money(t.subtotal)}</span></div><div><span>Tax on parts (${(rate * 100).toFixed(2)}%)</span><span>${money(t.tax)}</span></div><div class="grand"><span>Total</span><span>${money(t.total)}</span></div></div>
+      <label class="f section"><span>Note on invoice (optional)</span><textarea class="t" id="invNote" style="min-height:60px">${esc(draft.notes || "")}</textarea></label>
+      <div style="display:grid;gap:10px">
+        <button class="btn red block big" id="send">${cust.email ? "Send invoice to " + esc(cust.email) : "Finish invoice"}</button>
+        <button class="btn ghost block" id="saveD">Save draft</button>
+      </div>
+      ${me.shop.payment_url ? "" : `<p class="small muted" style="margin-top:10px">Online pay isn't hooked up yet, so the customer sees "call to pay" with the shop's number.</p>`}
+    </div>${pastHtml}`;
+    $$(".line input", box).forEach((inp) => inp.onchange = () => { const l = lines[+inp.closest(".line").dataset.i]; l[inp.dataset.k] = inp.dataset.k === "description" ? inp.value : Number(inp.value) || 0; draw(); });
+    $$("[data-del]", box).forEach((b) => b.onclick = () => { lines.splice(+b.dataset.del, 1); draw(); });
+    $("#addLabor").onclick = () => { lines.push({ kind: "labor", description: "Labor", qty: 1, price: Number(me.shop.labor_rate) || 0 }); draw(); };
+    $("#addOther").onclick = () => { lines.push({ kind: "other", description: "", qty: 1, price: 0 }); draw(); };
+    $("#saveD").onclick = () => saveDraft().then(() => toast("Draft saved")).catch(fail);
+    $("#send").onclick = sendIt;
+    wirePast(box);
+  };
+  const saveDraft = () => api.update("shop_invoices", `id=eq.${draft.id}`, { lines, notes: ($("#invNote") || {}).value || null, ...invTotals(lines, rate), updated_at: new Date().toISOString() });
+
+  async function sendIt() {
+    if (!lines.length) return toast("Add something to the invoice first");
+    busy("Finishing invoice…");
+    try {
+      await saveDraft();
+      const number = draft.number || await api.rpc("shop_next_invoice_no", { sid: me.shop.id });
+      const [inv] = await api.update("shop_invoices", `id=eq.${draft.id}`, { number });
+      if (cust.email) {
+        busy("Emailing invoice…");
+        const pdf = await invoicePDF(inv, car, cust);
+        await api.fn("shop-send", { shop_id: me.shop.id, car_id: car.id, kind: "invoice", invoice_id: inv.id, pdf_base64: pdf, page_url: carLink(car) + "#invoice" });
+        await api.insert("shop_entries", { shop_id: me.shop.id, car_id: car.id, kind: "status", body: `Invoice #${number} sent`, shared: false, author_id: me.user.id, author_name: me.member.display_name });
+        busy(null); toast("Invoice emailed");
+      } else {
+        await api.update("shop_invoices", `id=eq.${inv.id}`, { status: "sent", sent_at: new Date().toISOString() });
+        busy(null);
+        const msg = `${me.shop.name}: your invoice #${number} for the ${carName(car)} is ready — ${money(inv.total)}. View it here: ${carLink(car)}#invoice`;
+        sheet(`<h2>Invoice #${number} ready</h2><p class="muted">No email on file, so text the link instead.</p>
+          ${cust.phone ? `<a class="btn red block big" href="sms:${esc(cust.phone)}?&body=${encodeURIComponent(msg)}">Text it to ${esc(cust.name.split(" ")[0])}</a>` : ""}
+          <button class="btn ghost block" style="margin-top:10px" onclick="this.closest('.sheet-bg').remove()">Done</button>`);
+      }
+      touchCar(car); refresh("invoice");
+    } catch (e) { fail(e); }
+  }
+  draw();
+}
+
+function wirePast(box) {
+  const { car, cust, invoices } = carCache;
+  $$("[data-paid]", box).forEach((b) => b.onclick = async () => {
+    try { await api.update("shop_invoices", `id=eq.${b.dataset.paid}`, { status: "paid", paid_at: new Date().toISOString() }); toast("Marked paid"); refresh("invoice"); } catch (e) { fail(e); }
+  });
+  $$("[data-resend]", box).forEach((b) => b.onclick = async () => {
+    const inv = invoices.find((i) => i.id === b.dataset.resend);
+    if (!cust.email) return toast("No email on file for this customer");
+    busy("Emailing invoice…");
+    try { const pdf = await invoicePDF(inv, car, cust); await api.fn("shop-send", { shop_id: me.shop.id, car_id: car.id, kind: "invoice", invoice_id: inv.id, pdf_base64: pdf, page_url: carLink(car) + "#invoice" }); busy(null); toast("Invoice emailed"); refresh("invoice"); }
+    catch (e) { fail(e); }
+  });
+}
+
+/* Invoice PDF (attached to the email) */
+async function invoicePDF(inv, car, cust) {
+  const { PDFDocument, StandardFonts, rgb } = PDFLib;
+  const doc = await PDFDocument.create();
+  const page = doc.addPage([612, 792]);
+  const f = await doc.embedFont(StandardFonts.Helvetica), fb = await doc.embedFont(StandardFonts.HelveticaBold);
+  const shop = me.shop; const red = rgb(0.83, 0.16, 0.18), grey = rgb(0.4, 0.4, 0.4);
+  let y = 740;
+  const clean = (s) => String(s ?? "").replace(/[\r\n\t]+/g, " ").replace(/[^\x20-\x7E\u00A0-\u00FF\u2013\u2014\u2018\u2019\u201C\u201D\u2022\u2026]/g, "");
+  const text = (s, x, yy, o = {}) => page.drawText(clean(s), { x, y: yy, size: o.size || 10, font: o.bold ? fb : f, color: o.color || rgb(0, 0, 0) });
+  const right = (s, x, yy, o = {}) => { const w = (o.bold ? fb : f).widthOfTextAtSize(clean(s), o.size || 10); text(s, x - w, yy, o); };
+  const fit = (s, w, font = f, size = 10) => { s = clean(s); while (s && font.widthOfTextAtSize(s, size) > w) s = s.slice(0, -1); return s; };
+  page.drawRectangle({ x: 0, y: 762, width: 612, height: 30, color: rgb(0.08, 0.08, 0.08) });
+  text(shop.name.toUpperCase(), 48, 772, { size: 14, bold: true, color: rgb(1, 1, 1) });
+  page.drawRectangle({ x: 0, y: 758, width: 612, height: 4, color: red });
+  y = 728;
+  text(shop.address || "", 48, y, { color: grey }); text(shop.phone || "", 48, y - 13, { color: grey }); text(shop.email || "", 48, y - 26, { color: grey });
+  right("INVOICE", 564, y, { size: 20, bold: true });
+  right(`#${inv.number}`, 564, y - 20, { size: 12, bold: true });
+  right(new Date(inv.sent_at || Date.now()).toLocaleDateString("en-US"), 564, y - 34, { color: grey });
+  y = 660;
+  text("BILL TO", 48, y, { size: 8, bold: true, color: grey }); text("VEHICLE", 320, y, { size: 8, bold: true, color: grey });
+  text(cust.name, 48, y - 14, { bold: true }); text(carName(car), 320, y - 14, { bold: true });
+  text(cust.phone || "", 48, y - 27); text(car.color ? `Color: ${car.color}` : "", 320, y - 27);
+  text(cust.email || "", 48, y - 40); text(car.vin ? `VIN: ${car.vin}` : "", 320, y - 40);
+  text(fit(cust.address || "", 250), 48, y - 53);
+  y = 580;
+  page.drawRectangle({ x: 48, y: y - 4, width: 516, height: 18, color: rgb(0.93, 0.93, 0.93) });
+  text("ITEM", 54, y, { size: 8, bold: true }); right("QTY/HRS", 400, y, { size: 8, bold: true }); right("PRICE", 480, y, { size: 8, bold: true }); right("AMOUNT", 558, y, { size: 8, bold: true });
+  y -= 20;
+  for (const l of inv.lines || []) {
+    if (y < 140) { break; }
+    const amt = (Number(l.qty) || 0) * (Number(l.price) || 0);
+    text(fit(`${l.kind === "labor" ? "Labor: " : ""}${l.description || ""}`.replace(/^Labor: Labor$/, "Labor"), 300), 54, y);
+    right(String(l.qty), 400, y); right(money(l.price), 480, y); right(money(amt), 558, y);
+    page.drawLine({ start: { x: 48, y: y - 6 }, end: { x: 564, y: y - 6 }, thickness: 0.5, color: rgb(0.85, 0.85, 0.85) });
+    y -= 20;
+  }
+  y -= 6;
+  right("Subtotal", 480, y); right(money(inv.subtotal), 558, y); y -= 15;
+  right(`Tax on parts (${(Number(inv.tax_rate) * 100).toFixed(2)}%)`, 480, y); right(money(inv.tax), 558, y); y -= 20;
+  right("TOTAL", 480, y, { bold: true, size: 13 }); right(money(inv.total), 558, y, { bold: true, size: 13 });
+  if (inv.notes) { y -= 34; text("NOTE", 48, y, { size: 8, bold: true, color: grey }); y -= 13; String(inv.notes).split("\n").slice(0, 5).forEach((ln) => { text(fit(ln, 516), 48, y); y -= 13; }); }
+  text(shop.payment_url ? "Pay online from the link in your email." : `To pay, call ${shop.phone || "the shop"}.`, 48, 72, { color: grey });
+  text("Thank you for your business.", 48, 58, { color: grey });
+  return await doc.saveAsBase64();
+}
+
+/* Info tab */
+function tabInfo(box) {
+  const { car, cust, urls } = carCache;
+  box.innerHTML = `<form id="ci" class="card">
+      <h2>Customer</h2>
+      <label class="f section"><span>Name</span><input class="t" id="c_name" value="${esc(cust.name)}"></label>
+      <div class="grid2"><label class="f"><span>Phone</span><input class="t" id="c_phone" type="tel" value="${esc(cust.phone || "")}"></label>
+      <label class="f"><span>Email</span><input class="t" id="c_email" type="email" value="${esc(cust.email || "")}"></label></div>
+      <label class="f"><span>Address</span><input class="t" id="c_addr" value="${esc(cust.address || "")}"></label>
+      <h2 class="section">Vehicle</h2>
+      <div class="grid3 section"><label class="f"><span>Year</span><input class="t" id="v_year" value="${esc(car.year || "")}"></label>
+      <label class="f"><span>Make</span><input class="t" id="v_make" value="${esc(car.make || "")}"></label>
+      <label class="f"><span>Model</span><input class="t" id="v_model" value="${esc(car.model || "")}"></label></div>
+      <div class="grid2"><label class="f"><span>Color</span><input class="t" id="v_color" value="${esc(car.color || "")}"></label>
+      <label class="f"><span>VIN</span><input class="t" id="v_vin" value="${esc(car.vin || "")}"></label></div>
+      <label class="f"><span>Work requested</span><textarea class="t" id="v_work">${esc(car.work_requested || "")}</textarea></label>
+      <button class="btn red block" type="submit">Save</button>
+    </form>
+    <div class="card section"><h2>Drop-off agreement</h2>
+      ${car.waiver_signed_at ? `<p class="muted">Signed by ${esc(car.waiver_signed_name || cust.name)} on ${when(car.waiver_signed_at)}</p>${urls[car.waiver_signature] ? `<img src="${esc(urls[car.waiver_signature])}" alt="Signature" style="background:#f4f3ef;border-radius:8px;max-height:120px">` : ""}` : `<p class="muted">Not signed.</p>`}
+    </div>
+    <div class="card section"><h2>Customer link</h2><p class="muted">Checked in ${when(car.created_at)}</p><button class="btn block" id="qr2">Show QR code / send link</button></div>`;
+  $("#qr2").onclick = () => shareSheet(car, cust);
+  $("#ci").onsubmit = async (e) => {
+    e.preventDefault(); busy("Saving…");
+    try {
+      await api.update("shop_customers", `id=eq.${cust.id}`, { name: $("#c_name").value.trim(), phone: $("#c_phone").value.trim() || null, email: $("#c_email").value.trim() || null, address: $("#c_addr").value.trim() || null });
+      await api.update("shop_cars", `id=eq.${car.id}`, { year: $("#v_year").value.trim() || null, make: $("#v_make").value.trim() || null, model: $("#v_model").value.trim() || null, color: $("#v_color").value.trim() || null, vin: $("#v_vin").value.trim() || null, work_requested: $("#v_work").value.trim() || null, updated_at: new Date().toISOString() });
+      busy(null); toast("Saved"); refresh("info");
+    } catch (err) { fail(err); }
+  };
+}
+
+/* ---------- owner: crew + settings ---------- */
+async function showCrew() {
+  if (me.member.role !== "owner") return route("#/");
+  view.innerHTML = `<button class="back" onclick="location.hash='#/'">‹ All cars</button><h1>Crew logins</h1><div id="list" class="section"><div class="empty">Loading…</div></div>
+    <form id="add" class="card section"><h2>Add someone</h2>
+      <label class="f section"><span>Name</span><input class="t" id="m_name" required autocapitalize="words"></label>
+      <label class="f"><span>Email (their login)</span><input class="t" id="m_email" type="email" required autocapitalize="off"></label>
+      <label class="f"><span>Starting password (8+ characters)</span><input class="t" id="m_pw" minlength="8" required></label>
+      <label class="f"><span>Access</span><select class="t" id="m_role"><option value="tech">Shop crew</option><option value="owner">Owner (can add crew and change settings)</option></select></label>
+      <button class="btn red block" type="submit">Add to crew</button></form>`;
+  const load = async () => {
+    const rows = await api.select("shop_members", `select=user_id,display_name,role,active&shop_id=eq.${me.shop.id}&order=display_name`);
+    $("#list").innerHTML = rows.map((m) => `<div class="entry"><div><strong>${esc(m.display_name)}</strong> <span class="small muted">${m.role === "owner" ? "Owner" : "Crew"}${m.active ? "" : " · turned off"}</span></div>
+      ${m.user_id === me.user.id ? "<span class='small muted'>You</span>" : `<button class="btn ghost" data-u="${m.user_id}" data-a="${m.active ? 0 : 1}" style="min-height:38px;padding:6px 10px">${m.active ? "Turn off" : "Turn on"}</button>`}</div>`).join("");
+    $$("#list [data-u]").forEach((b) => b.onclick = async () => { try { await api.fn("shop-admin", { shop_id: me.shop.id, action: "set_active", user_id: b.dataset.u, active: b.dataset.a === "1" }); load(); } catch (e) { fail(e); } });
+  };
+  load().catch(fail);
+  $("#add").onsubmit = async (e) => {
+    e.preventDefault(); busy("Adding…");
+    try {
+      await api.fn("shop-admin", { shop_id: me.shop.id, action: "add_member", display_name: $("#m_name").value.trim(), email: $("#m_email").value.trim(), password: $("#m_pw").value, role: $("#m_role").value });
+      busy(null); toast("Added. Give them their email and password."); e.target.reset(); load();
+    } catch (err) { fail(err); }
+  };
+}
+
+function showSettings() {
+  if (me.member.role !== "owner") return route("#/");
+  const s = me.shop;
+  view.innerHTML = `<button class="back" onclick="location.hash='#/'">‹ All cars</button><h1>Shop settings</h1>
+    <form id="sf" class="card section">
+      <label class="f"><span>Shop name</span><input class="t" id="s_name" value="${esc(s.name)}"></label>
+      <div class="grid2"><label class="f"><span>Phone</span><input class="t" id="s_phone" value="${esc(s.phone || "")}"></label>
+      <label class="f"><span>Email (customer replies go here)</span><input class="t" id="s_email" value="${esc(s.email || "")}"></label></div>
+      <label class="f"><span>Address</span><input class="t" id="s_addr" value="${esc(s.address || "")}"></label>
+      <div class="grid2"><label class="f"><span>Sales tax on parts (%)</span><input class="t" id="s_tax" type="number" step="0.001" value="${(Number(s.tax_rate) * 100).toFixed(3)}"></label>
+      <label class="f"><span>Labor rate per hour ($)</span><input class="t" id="s_labor" type="number" step="0.01" value="${esc(s.labor_rate)}"></label></div>
+      <label class="f"><span>Online payment link (from your card processor, optional)</span><input class="t" id="s_pay" value="${esc(s.payment_url || "")}" placeholder="https://…"></label>
+      <label class="f"><span>Drop-off agreement wording</span><textarea class="t" id="s_waiver" style="min-height:140px">${esc(s.waiver_text || "")}</textarea></label>
+      <button class="btn red block" type="submit">Save</button></form>`;
+  $("#sf").onsubmit = async (e) => {
+    e.preventDefault(); busy("Saving…");
+    try {
+      const patch = { name: $("#s_name").value.trim() || s.name, phone: $("#s_phone").value.trim() || null, email: $("#s_email").value.trim() || null, address: $("#s_addr").value.trim() || null,
+        tax_rate: r2(Number($("#s_tax").value) * 1000) / 100000, labor_rate: r2($("#s_labor").value), payment_url: $("#s_pay").value.trim() || null, waiver_text: $("#s_waiver").value.trim() || null };
+      const [row] = await api.update("shops", `id=eq.${s.id}`, patch);
+      me.shop = row || { ...s, ...patch }; busy(null); toast("Saved");
+    } catch (err) { fail(err); }
+  };
+}
+
+render();
+})();
+</script>
+</body>
+</html>
